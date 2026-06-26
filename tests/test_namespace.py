@@ -179,25 +179,41 @@ class TestTyping:
 
 
 class TestRegisterBot:
-    async def test_register_bot_stores_and_emits(self, hub, fake_sio, user_token):
+    async def test_register_bot_stores_and_emits(self, hub, fake_sio, bot_token):
+        await hub.namespace.on_connect("sid-1", {})
+        await hub.namespace.on_authenticate("sid-1", {"token": bot_token(name="greeter")})
+
+        await hub.namespace.on_register_bot(
+            "sid-1", {"description": "A greeter bot", "commands": [], "context_limit": 30}
+        )
+
+        assert "greeter" in hub.bot_registry
+        assert hub.bot_registry["greeter"]["description"] == "A greeter bot"
+        registered = fake_sio.events(EventName.BOT_REGISTERED.value)
+        assert len(registered) == 1
+        assert registered[0]["data"]["bot_name"] == "greeter"
+
+    async def test_register_bot_rejects_user(self, hub, fake_sio, user_token):
+        """BUSINESS RULE: only bots may register_bot. A user token is rejected."""
         await hub.namespace.on_connect("sid-1", {})
         await hub.namespace.on_authenticate("sid-1", {"token": user_token()})
 
         await hub.namespace.on_register_bot("sid-1", {"bot_name": "greeter"})
 
-        assert "greeter" in hub.bot_registry
-        registered = fake_sio.events(EventName.BOT_REGISTERED.value)
-        assert len(registered) == 1
-        assert registered[0]["data"]["bot_name"] == "greeter"
+        assert "greeter" not in hub.bot_registry
+        assert len(fake_sio.events(EventName.ERROR.value)) == 1
 
-    async def test_register_bot_missing_name_rejected(self, hub, fake_sio, user_token):
+    async def test_register_bot_missing_fields_defaults(self, hub, fake_sio, bot_token):
+        """Missing description/commands default to empty, not an error."""
         await hub.namespace.on_connect("sid-1", {})
-        await hub.namespace.on_authenticate("sid-1", {"token": user_token()})
+        await hub.namespace.on_authenticate("sid-1", {"token": bot_token(name="echo")})
 
         await hub.namespace.on_register_bot("sid-1", {})
 
-        assert fake_sio.events(EventName.BOT_REGISTERED.value) == []
-        assert len(fake_sio.events(EventName.ERROR.value)) == 1
+        assert "echo" in hub.bot_registry
+        assert hub.bot_registry["echo"]["description"] == ""
+        assert hub.bot_registry["echo"]["commands"] == []
+        assert fake_sio.events(EventName.BOT_REGISTERED.value)
 
 
 class TestDisconnect:

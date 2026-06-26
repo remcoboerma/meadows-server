@@ -125,15 +125,32 @@ class ChatNamespace(socketio.AsyncNamespace):
     # -- bot registration -------------------------------------------------
 
     async def on_register_bot(self, sid: str, data: dict) -> None:
+        """Register bot metadata (description, commands, context_limit).
+
+        BUSINESS RULE (MEADOWS §2 line 41): the bot's identity comes from
+        the verified JWT claims, NOT from the payload. The bot cannot
+        self-assert a different name. The monolith enforced this at
+        sioserver.py:1751-1764 by disconnecting on mismatch; here we
+        simply ignore any payload bot_name and use claims.bot_name.
+        """
         session = await self._require_auth(sid)
         if session is None:
             return
-        bot_name = data.get("bot_name") if isinstance(data, dict) else None
-        if not bot_name:
-            await self.hub.emit_frame(EventName.ERROR, {"error": "missing bot_name"}, sid=sid)
-            return
         claims = session["claims"]
-        self.hub.bot_registry[bot_name] = {"sid": sid, "claims": claims}
+        if not claims.is_bot():
+            await self.hub.emit_frame(EventName.ERROR, {"error": "only bots may register_bot"}, sid=sid)
+            return
+        bot_name = claims.bot_name or claims.sub
+        description = data.get("description", "") if isinstance(data, dict) else ""
+        commands = data.get("commands", []) if isinstance(data, dict) else []
+        context_limit = data.get("context_limit", 30) if isinstance(data, dict) else 30
+        self.hub.bot_registry[bot_name] = {
+            "sid": sid,
+            "claims": claims,
+            "description": description,
+            "commands": commands,
+            "context_limit": context_limit,
+        }
         await self.hub.emit_frame(EventName.BOT_REGISTERED, {"bot_name": bot_name}, sid=sid)
 
     # -- helpers ----------------------------------------------------------
