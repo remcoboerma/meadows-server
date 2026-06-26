@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["hatch", "pytest>=8.0.0", "pytest-asyncio>=0.23.0", "ruff==0.14.9"]
+dev = ["hatch", "pytest>=8.0.0", "pytest-asyncio>=0.23.0", "pytest-cov>=5.0.0", "ruff==0.14.9"]
 integration = [
     "meadows-client",
     "meadows-bot",

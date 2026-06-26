@@ -81,12 +81,16 @@ class Hub:
         *,
         room: str | None = None,
         sid: str | None = None,
+        skip_sid: str | None = None,
     ) -> None:
         """The chokepoint — validate against the protocol, then emit.
 
         Every client-bound frame passes through here. Validation runs before
         any bytes hit the wire; an invalid frame raises ``ValueError`` and is
         never emitted.
+
+        ``skip_sid`` excludes a specific client from a room broadcast — used
+        to avoid echoing typing/presence events back to their sender.
         """
         validate_frame(event, data)
         kwargs: dict[str, Any] = {"namespace": self.NAMESPACE}
@@ -94,6 +98,8 @@ class Hub:
             kwargs["to"] = sid
         elif room is not None:
             kwargs["room"] = room
+        if skip_sid is not None:
+            kwargs["skip_sid"] = skip_sid
         await self.sio.emit(event, data, **kwargs)
 
 

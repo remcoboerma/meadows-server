@@ -120,6 +120,7 @@ class ChatNamespace(socketio.AsyncNamespace):
             EventName.USER_TYPING,
             {"group_id": group_id, "user_id": claims.sub, "username": claims.name()},
             room=group_id,
+            skip_sid=sid,
         )
 
     # -- bot registration -------------------------------------------------
