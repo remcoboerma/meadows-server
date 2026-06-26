@@ -1,0 +1,41 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "meadows-server"
+dynamic = ["version"]
+description = "MEADOWS coordination hub: object-oriented Hub, single chokepoint emit, JWT auth, JSONL persistence."
+readme = "README.md"
+requires-python = ">=3.12"
+license-expression = "MIT"
+authors = [{ name = "MEADOWS" }]
+dependencies = [
+    "meadows-protocol",
+    "python-socketio>=5.11.0",
+    "uvicorn>=0.30.0",
+    "pyjwt>=2.12.0",
+]
+
+[project.optional-dependencies]
+dev = ["hatch", "pytest>=8.0.0", "pytest-asyncio>=0.23.0", "ruff==0.14.9"]
+
+[tool.hatch.version]
+path = "src/meadows/server/__about__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/meadows"]
+
+[tool.uv.sources]
+meadows-protocol = { path = "../meadows-protocol", editable = true }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["F", "E", "W", "Q", "A", "SIM", "ARG", "PTH", "RUF", "C90", "N", "YTT"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
