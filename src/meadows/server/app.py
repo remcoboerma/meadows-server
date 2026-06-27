@@ -49,10 +49,12 @@ class MeadowServer:
 
 def create_app() -> MeadowServer:
     """Build the ASGI app from environment configuration."""
+    messages_dir = Path(_env("MEADOWS_MESSAGES_DIR", "./messages"))
     hub = Hub(
         jwt_secret=_load_jwt_secret(),
-        messages_dir=Path(_env("MEADOWS_MESSAGES_DIR", "./messages")),
+        messages_dir=messages_dir,
         cors_origins=_env("MEADOWS_CORS_ORIGINS", "*"),
+        ntfy_prefs_path=messages_dir.parent / "ntfy_prefs.json",
     )
     return MeadowServer(hub)
 

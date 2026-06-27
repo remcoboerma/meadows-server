@@ -53,7 +53,8 @@ class TestAuthenticate:
         assert len(joined) == 1
         assert joined[0]["data"]["group_id"] == GENERAL_GROUP
         assert ("sid-1", "general", "/chat") in fake_sio.rooms_entered
-        assert "sid-1" in hub.groups[GENERAL_GROUP].members
+        # members is now keyed by user_id (from JWT sub), not by sid
+        assert "user-alice" in hub.groups[GENERAL_GROUP].members
 
     async def test_good_bot_token_authenticates(self, hub, fake_sio, bot_token):
         await hub.namespace.on_connect("sid-1", {})
@@ -226,4 +227,5 @@ class TestDisconnect:
 
         assert "sid-1" not in hub.user_sessions
         assert ("sid-1", "general", "/chat") in fake_sio.rooms_left
-        assert "sid-1" not in hub.groups[GENERAL_GROUP].members
+        # members is keyed by user_id, not sid
+        assert "user-alice" not in hub.groups[GENERAL_GROUP].members

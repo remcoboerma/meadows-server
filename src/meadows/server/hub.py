@@ -21,6 +21,7 @@ from meadows.protocol import EventName
 from meadows.server.chokepoint import validate_frame
 from meadows.server.groups import GroupState
 from meadows.server.namespace import GENERAL_GROUP, ChatNamespace
+from meadows.server.ntfy_prefs import NtfyPrefsStore
 from meadows.server.persistence import JSONLPersistence
 
 
@@ -39,6 +40,7 @@ class Hub:
         jwt_secret: bytes,
         messages_dir: Path,
         cors_origins: str = "*",
+        ntfy_prefs_path: Path | None = None,
     ) -> None:
         self.jwt_secret = jwt_secret
         self.messages_dir = Path(messages_dir)
@@ -55,6 +57,9 @@ class Hub:
         self.pattern_registry: dict[str, list[dict[str, Any]]] = {}
 
         self.persistence = JSONLPersistence(self.messages_dir)
+        # BUSINESS RULE (§3.3): ntfy prefs stored per-user; the server owns
+        # this because only the server knows who is online.
+        self.ntfy_prefs = NtfyPrefsStore(ntfy_prefs_path or (self.messages_dir.parent / "ntfy_prefs.json"))
         self.namespace = ChatNamespace(self.NAMESPACE, hub=self)
         self.sio.register_namespace(self.namespace)
 
