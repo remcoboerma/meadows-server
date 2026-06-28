@@ -26,7 +26,7 @@ import pytest
 import uvicorn
 
 from meadows.client import MeadowClient
-from meadows.protocol import EventName, JWTRole, build_claims
+from meadows.protocol import EventName, JWTRole, build_claims, MessageType
 
 # Skip the entire module if the integration deps aren't installed.
 pytest.importorskip("meadows.client")
@@ -118,20 +118,45 @@ def integration_server(integration_secret: bytes, tmp_path_factory: pytest.TempP
 
 @pytest.fixture
 async def user_client(integration_secret: bytes) -> MeadowClient:
-    """A real MeadowClient authenticated as a user."""
+    """A real MeadowClient authenticated as a user (no special permissions).
+
+    BUSINESS RULE (MEADOWS §3.1 line 54): the hub is an object with explicit
+    lifecycle. This fixture creates a real client that connects, authenticates
+    via JWT handshake, and yields until disconnected — the same lifecycle a
+    browser client goes through. No mocks.
+    """
     client = MeadowClient(
         server_url=INTEGRATION_SERVER_URL,
         claims=build_claims(name="alice", role=JWTRole.USER),
         jwt_secret=integration_secret,
     )
     await client.connect()
-    # Wait for authentication to complete
     deadline = time.time() + 5
     while not client.authenticated and time.time() < deadline:
         await asyncio.sleep(0.05)
     assert client.authenticated, "User client did not authenticate in 5s"
     yield client
     await client.disconnect()
+
+
+def make_user_client(integration_secret: bytes, *, permissions: list[str] | None = None):
+    """Factory: build a real MeadowClient with specific JWT permissions.
+
+    BUSINESS RULE (MEADOWS §3.3 line 73): @everyone requires 'mention-all'
+    permission — the only permission-gated notification type. Tests that
+    verify the gate need a client with specific permissions, which the
+    standard user_client fixture (no permissions) can't provide.
+    """
+    client = MeadowClient(
+        server_url=INTEGRATION_SERVER_URL,
+        claims=build_claims(
+            name="alice",
+            role=JWTRole.USER,
+            permissions=permissions or [],
+        ),
+        jwt_secret=integration_secret,
+    )
+    return client
 
 
 @pytest.fixture
@@ -279,3 +304,174 @@ class TestIntegrationProtocolContract:
         assert "content" in msg
         assert msg["type"] == "user"
         assert msg["content"] == "protocol check"
+
+
+class TestIntegrationReactions:
+    """End-to-end reaction tests — proves the ➕ button flow works over real Socket.IO.
+
+    BUSINESS RULE (MEADOWS §3.3 line 73): reactions are core machinery. The
+    server persists them as type='reaction' messages and emits REACTION_ADDED
+    / REACTION_TOGGLED events. This test sends a message, reacts to it, and
+    toggles the reaction off — the same flow validated via Playwright.
+    """
+
+    async def test_add_reaction_end_to_end(self, user_client, integration_secret):
+        """User sends message, then adds a 👍 reaction — REACTION_ADDED received."""
+        received: list[dict] = []
+
+        def on_reaction_added(data: dict) -> None:
+            received.append(data)
+
+        user_client.on(EventName.REACTION_ADDED, on_reaction_added)
+
+        # Send a message first
+        msg_received: list[dict] = []
+        user_client.on(EventName.MESSAGE, lambda d: msg_received.append(d))
+        await user_client.send_message(content="react to me", group_id="general")
+        deadline = time.time() + 3
+        while not msg_received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+
+        assert msg_received, "Message broadcast not received"
+        msg_id = msg_received[0]["id"]
+
+        # Add reaction
+        await user_client.emit(
+            EventName.ADD_REACTION,
+            {"emoji": "👍", "target_message_id": msg_id, "group_id": "general"},
+        )
+
+        deadline = time.time() + 3
+        while not received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+
+        assert received, "REACTION_ADDED not received"
+        assert received[0]["emoji"] == "👍"
+        assert received[0]["target_message_id"] == msg_id
+        assert received[0]["type"] == MessageType.REACTION.value
+
+    async def test_toggle_reaction_end_to_end(self, user_client, integration_secret):
+        """Adding the same emoji twice toggles it off — REACTION_TOGGLED received."""
+        added: list[dict] = []
+        toggled: list[dict] = []
+
+        user_client.on(EventName.REACTION_ADDED, lambda d: added.append(d))
+        user_client.on(EventName.REACTION_TOGGLED, lambda d: toggled.append(d))
+
+        # Send a message
+        msg_received: list[dict] = []
+        user_client.on(EventName.MESSAGE, lambda d: msg_received.append(d))
+        await user_client.send_message(content="toggle me", group_id="general")
+        deadline = time.time() + 3
+        while not msg_received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        msg_id = msg_received[0]["id"]
+
+        # Add reaction
+        await user_client.emit(
+            EventName.ADD_REACTION,
+            {"emoji": "🎉", "target_message_id": msg_id, "group_id": "general"},
+        )
+        deadline = time.time() + 3
+        while not added and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert added, "REACTION_ADDED not received"
+
+        # Toggle off
+        await user_client.emit(
+            EventName.ADD_REACTION,
+            {"emoji": "🎉", "target_message_id": msg_id, "group_id": "general"},
+        )
+        deadline = time.time() + 3
+        while not toggled and time.time() < deadline:
+            await asyncio.sleep(0.05)
+
+        assert toggled, "REACTION_TOGGLED not received"
+        assert toggled[0]["removed"] is True
+
+
+class TestIntegrationReplies:
+    """End-to-end reply tests — proves the ⤴️ Reply flow works over real Socket.IO."""
+
+    async def test_reply_carries_quoted_message_end_to_end(self, user_client):
+        """User sends a message, then replies to it — quoted_message present in broadcast."""
+        received: list[dict] = []
+
+        user_client.on(EventName.MESSAGE, lambda d: received.append(d))
+
+        # Send original message
+        await user_client.send_message(content="original message", group_id="general")
+        deadline = time.time() + 3
+        while not received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        original_id = received[0]["id"]
+        original_ts = received[0]["timestamp"]
+
+        # Send reply with quoted_message via raw emit (send_message doesn't support quoted dict)
+        received.clear()
+        reply_data = {
+            "content": "this is a reply",
+            "group_id": "general",
+            "quoted_message": {
+                "id": original_id,
+                "author": "alice",
+                "content": "original message",
+                "timestamp": original_ts,
+            },
+        }
+        await user_client.emit(EventName.MESSAGE, reply_data)
+
+        deadline = time.time() + 3
+        while not received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+
+        assert received, "Reply broadcast not received"
+        reply = received[0]
+        assert reply["content"] == "this is a reply"
+        assert reply["quoted_message"]["id"] == original_id
+        assert reply["quoted_message"]["author"] == "alice"
+        assert reply["quoted_message"]["content"] == "original message"
+
+
+class TestIntegrationEveryone:
+    """End-to-end @everyone tests — proves the permission gate works over real Socket.IO.
+
+    BUSINESS RULE (monolith sioserver.py:2282-2286): @everyone/@all sets
+    is_everyone=True on the message BEFORE broadcast. The sender must have
+    'mention-all' permission. Without it, is_everyone stays False.
+    """
+
+    async def test_everyone_with_permission_sets_flag(self, integration_secret):
+        """User WITH mention-all: @everyone → is_everyone=True in broadcast."""
+        received: list[dict] = []
+        client = make_user_client(integration_secret, permissions=["mention-all"])
+        await client.connect()
+        deadline = time.time() + 5
+        while not client.authenticated and time.time() < deadline:
+            await asyncio.sleep(0.05)
+        assert client.authenticated
+
+        client.on(EventName.MESSAGE, lambda d: received.append(d))
+        await client.send_message(content="@everyone meeting time", group_id="general")
+
+        deadline = time.time() + 3
+        while not received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+
+        assert received, "Message not received"
+        assert received[0]["is_everyone"] is True
+        await client.disconnect()
+
+    async def test_everyone_without_permission_no_flag(self, user_client):
+        """User WITHOUT mention-all: @everyone → is_everyone=False (no gate triggered)."""
+        received: list[dict] = []
+        user_client.on(EventName.MESSAGE, lambda d: received.append(d))
+
+        await user_client.send_message(content="@everyone wake up", group_id="general")
+
+        deadline = time.time() + 3
+        while not received and time.time() < deadline:
+            await asyncio.sleep(0.05)
+
+        assert received, "Message not received"
+        assert received[0]["is_everyone"] is False

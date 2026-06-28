@@ -732,12 +732,14 @@ wheels = [
 name = "meadows-bot"
 source = { editable = "../meadows-bot" }
 dependencies = [
+    { name = "aiohttp" },
     { name = "meadows-client" },
     { name = "meadows-protocol" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9.0" },
     { name = "hatch", marker = "extra == 'dev'" },
     { name = "meadows-client", editable = "../meadows-client" },
     { name = "meadows-protocol", editable = "../meadows-protocol" },

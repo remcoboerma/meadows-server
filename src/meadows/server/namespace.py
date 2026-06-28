@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import jwt as pyjwt
 import socketio
 
-from meadows.protocol import EventName, Message, MessageType, build_claims
+from meadows.protocol import EventName, Message, MessageType, build_claims, parse_everyone
 from meadows.protocol.codec import message_from_wire
 from meadows.protocol.jwt import ALGORITHM, JWTRole
 from meadows.protocol.permissions import AVAILABLE_PERMISSIONS
@@ -171,12 +171,20 @@ class ChatNamespace(socketio.AsyncNamespace):
         BUSINESS RULE (MEADOWS §3.3): patterns and @bot routing are core
         server machinery, not bot features. The server evaluates registered
         regexes on every message and routes @bot mentions to the named bot.
+
+        BUSINESS RULE (monolith sioserver.py:2282-2286): @everyone/@all sets
+        is_everyone=True on the message BEFORE broadcast so clients can style
+        it. The sender must have 'mention-all' permission — this is the only
+        permission-gated notification type. Without the permission, the
+        message is still sent but is_everyone stays False (no glow, no ntfy).
         """
         session = await self._require_auth(sid)
         if session is None:
             return
         claims = session["claims"]
         msg = self._build_message(data, claims, MessageType.USER if claims.is_user() else MessageType.BOT)
+        if parse_everyone(msg.content) and "mention-all" in claims.permissions:
+            msg.is_everyone = True
         await self._dispatch_message(msg)
 
     async def on_bot_response(self, sid: str, data: dict) -> None:
