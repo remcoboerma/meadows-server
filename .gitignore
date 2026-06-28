@@ -17,3 +17,5 @@ build/
 *.swp
 *.bak
 .DS_Store
+messages/
+shared_keys/
