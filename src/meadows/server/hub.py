@@ -66,9 +66,22 @@ class Hub:
     # -- lifecycle --------------------------------------------------------
 
     async def start(self) -> None:
-        """Prepare the hub for serving: ensure the message store and seed groups."""
+        """Prepare the hub for serving: ensure the message store and discover groups.
+
+        BUSINESS RULE: groups are derived from the JSONL files on disk —
+        each ``<group_id>.jsonl`` file is a group. This means groups survive
+        restarts without a separate metadata store. Deleted groups
+        (``.jsonl.deleted``) are skipped. The messages_dir IS the source of
+        truth for which groups exist.
+        """
         self.messages_dir.mkdir(parents=True, exist_ok=True)
+        # Seed "general" even if no JSONL exists yet (fresh install)
         self.groups.setdefault(GENERAL_GROUP, GroupState(group_id=GENERAL_GROUP))
+        # Discover all groups from existing JSONL files
+        for path in self.messages_dir.glob("*.jsonl"):
+            group_id = path.stem
+            if group_id and group_id not in self.groups:
+                self.groups[group_id] = GroupState(group_id=group_id, name=group_id)
 
     async def stop(self) -> None:
         """Tear down hub state.
