@@ -33,13 +33,13 @@ class JSONLPersistence:
 
     def __init__(self, messages_dir: Path) -> None:
         self.messages_dir = Path(messages_dir)
+        self.messages_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, group_id: str) -> Path:
         return self.messages_dir / f"{_safe_filename(group_id)}.jsonl"
 
     async def store(self, group_id: str, msg: Message) -> None:
         """Append a message as one JSON line to the group's file."""
-        self.messages_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps(message_to_wire(msg), separators=(",", ":"))
         with self._path(group_id).open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")

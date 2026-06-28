@@ -66,15 +66,17 @@ class Hub:
     # -- lifecycle --------------------------------------------------------
 
     async def start(self) -> None:
-        """Prepare the hub for serving: ensure the message store and discover groups.
+        """Prepare the hub for serving: discover groups from JSONL files.
 
         BUSINESS RULE: groups are derived from the JSONL files on disk —
         each ``<group_id>.jsonl`` file is a group. This means groups survive
         restarts without a separate metadata store. Deleted groups
         (``.jsonl.deleted``) are skipped. The messages_dir IS the source of
         truth for which groups exist.
+
+        Directory creation is handled once in JSONLPersistence.__init__
+        and NtfyPrefsStore.__init__, not repeatedly on each operation.
         """
-        self.messages_dir.mkdir(parents=True, exist_ok=True)
         # Seed "general" even if no JSONL exists yet (fresh install)
         self.groups.setdefault(GENERAL_GROUP, GroupState(group_id=GENERAL_GROUP))
         # Discover all groups from existing JSONL files

@@ -75,13 +75,31 @@ class TestHubStateIsolation:
 
 
 class TestHubLifecycle:
-    async def test_start_creates_messages_dir_and_seeds_general(self, jwt_secret: bytes, tmp_path: Path):
-        hub = Hub(jwt_secret=jwt_secret, messages_dir=tmp_path / "fresh" / "msgs")
-        assert not (tmp_path / "fresh").exists()
+    async def test_start_seeds_general_and_discovers_groups(self, jwt_secret: bytes, tmp_path: Path):
+        """BUSINESS RULE: groups are discovered from JSONL files on disk.
+
+        The messages_dir is created in JSONLPersistence.__init__ (once, at
+        construction time). Hub.start() then scans for *.jsonl files and
+        creates GroupState entries for each. "general" is always seeded
+        even if no general.jsonl exists yet (fresh install).
+        """
+        msgs_dir = tmp_path / "fresh" / "msgs"
+        # Simulate pre-existing groups on disk
+        msgs_dir.mkdir(parents=True)
+        msg_line = '{"id":"1","type":"user","user_id":"u","group_id":"g","content":"hi"}\n'
+        (msgs_dir / "general.jsonl").write_text(msg_line)
+        (msgs_dir / "testgroep.jsonl").write_text(msg_line)
+        # Deleted group should be skipped
+        (msgs_dir / "oldgroup.jsonl.deleted").write_text("ignored\n")
+
+        hub = Hub(jwt_secret=jwt_secret, messages_dir=msgs_dir)
         await hub.start()
-        assert (tmp_path / "fresh" / "msgs").is_dir()
+
         assert "general" in hub.groups
+        assert "testgroep" in hub.groups
+        assert "oldgroup" not in hub.groups
         assert isinstance(hub.groups["general"], GroupState)
+        assert isinstance(hub.groups["testgroep"], GroupState)
 
     async def test_start_is_idempotent(self, hub: Hub):
         await hub.start()

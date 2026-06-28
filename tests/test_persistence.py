@@ -74,12 +74,17 @@ class TestMissingGroup:
 
 
 class TestStoreCreatesDirectory:
-    async def test_store_creates_missing_dir(self, tmp_path: Path):
+    async def test_init_creates_missing_dir(self, tmp_path: Path):
+        """BUSINESS RULE: directory creation happens once in __init__, not on every store()."""
         target = tmp_path / "nested" / "store"
-        store = JSONLPersistence(target)
         assert not target.exists()
-        await store.store("general", _msg("hi"))
+        JSONLPersistence(target)
         assert target.is_dir()
+
+    async def test_store_writes_to_existing_dir(self, tmp_path: Path):
+        target = tmp_path / "store"
+        store = JSONLPersistence(target)
+        await store.store("general", _msg("hi"))
         assert (target / "general.jsonl").exists()
 
 

@@ -48,7 +48,15 @@ class MeadowServer:
 
 
 def create_app() -> MeadowServer:
-    """Build the ASGI app from environment configuration."""
+    """Build the ASGI app from environment configuration.
+
+    The Hub is started eagerly (hub.start()) so group discovery from JSONL
+    files happens before uvicorn accepts connections. This avoids the
+    complexity of ASGI lifespan event interception (which conflicts with
+    socketio.ASGIApp's own lifespan handling).
+    """
+    import asyncio
+
     messages_dir = Path(_env("MEADOWS_MESSAGES_DIR", "./messages"))
     hub = Hub(
         jwt_secret=_load_jwt_secret(),
@@ -56,6 +64,8 @@ def create_app() -> MeadowServer:
         cors_origins=_env("MEADOWS_CORS_ORIGINS", "*"),
         ntfy_prefs_path=messages_dir.parent / "ntfy_prefs.json",
     )
+    # Run hub.start() synchronously before serving — discovers groups from disk.
+    asyncio.run(hub.start())
     return MeadowServer(hub)
 
 

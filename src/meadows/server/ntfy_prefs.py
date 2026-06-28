@@ -35,6 +35,7 @@ class NtfyPrefsStore:
 
     def __init__(self, prefs_path: Path) -> None:
         self.prefs_path = Path(prefs_path)
+        self.prefs_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _load_all(self) -> dict[str, dict]:
         if not self.prefs_path.exists():
@@ -49,8 +50,7 @@ class NtfyPrefsStore:
         return self._load_all().get(user_id, dict(DEFAULT_PREFS))
 
     def set(self, user_id: str, prefs: dict) -> None:
-        """Save prefs for a user. Creates the file if it doesn't exist."""
-        self.prefs_path.parent.mkdir(parents=True, exist_ok=True)
+        """Save prefs for a user."""
         all_prefs = self._load_all()
         all_prefs[user_id] = {**DEFAULT_PREFS, **prefs}
         self.prefs_path.write_text(json.dumps(all_prefs, indent=2), encoding="utf-8")
