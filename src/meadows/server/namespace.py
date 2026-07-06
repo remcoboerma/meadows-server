@@ -22,7 +22,7 @@ import socketio
 
 from meadows.protocol import EventName, Message, MessageType, build_claims, parse_everyone
 from meadows.protocol.codec import message_from_wire
-from meadows.protocol.jwt import ALGORITHM, JWTRole
+from meadows.protocol.jwt import ALGORITHM, JWTRole, JWTClaims
 from meadows.protocol.permissions import AVAILABLE_PERMISSIONS
 
 from meadows.server.auth import AuthError, verify_token
@@ -36,7 +36,17 @@ GENERAL_GROUP = "general"
 TYPING_COOLDOWN_SECONDS = 1.0
 MAX_PATTERNS_PER_BOT = 50
 MAX_PATTERN_LENGTH = 512
+MAX_WEBHOOK_CONTENT = 100_000
 _GROUP_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+
+class WebhookError(Exception):
+    """Raised by handle_webhook so the ASGI layer can send the right HTTP status."""
+
+    def __init__(self, status_code: int, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
 
 
 def _parse_expiry(expiry_str: str) -> float:
@@ -892,6 +902,49 @@ class ChatNamespace(socketio.AsyncNamespace):
         # Evaluate registered patterns
         await self._evaluate_patterns(msg.group_id, msg)
 
+    async def handle_webhook(self, group_id: str, claims: JWTClaims, data: dict) -> str:
+        """Handle an inbound webhook message over HTTP transport.
+
+        This is the HTTP equivalent of ``on_message`` — it builds a
+        ``MessageType.WEBHOOK`` message and feeds it into the same
+        ``_dispatch_message`` pipeline (broadcast, persist, @bot routing,
+        pattern evaluation). The only difference is the transport: HTTP
+        POST instead of a Socket.IO event.
+
+        BUSINESS RULE: any valid JWT (user or bot) may use the webhook.
+        Transport is not restricted — the webhook is an alternative
+        delivery mechanism, not a privileged one.
+
+        BUSINESS RULE: @everyone is supported if the JWT carries the
+        ``mention-all`` permission, matching ``on_message`` behaviour.
+
+        Returns the message id on success. Raises ``WebhookError`` on
+        validation failure so the ASGI layer can send the right HTTP status.
+        """
+        if group_id not in self.hub.groups:
+            raise WebhookError(404, "group not found")
+
+        content = (data.get("content") if isinstance(data, dict) else "") or ""
+        content = content.strip()
+        if not content:
+            raise WebhookError(400, "content is required")
+        if len(content) > MAX_WEBHOOK_CONTENT:
+            raise WebhookError(400, "content too large")
+
+        msg = Message(
+            type=MessageType.WEBHOOK,
+            user_id=claims.sub,
+            username=claims.username if claims.is_user() else None,
+            bot_name=claims.bot_name if claims.is_bot() else None,
+            group_id=group_id,
+            content=content,
+        )
+        if parse_everyone(msg.content) and "mention-all" in claims.permissions:
+            msg.is_everyone = True
+
+        await self._dispatch_message(msg)
+        return msg.id
+
     async def _route_bot_commands(self, msg: Message) -> None:
         """Parse @botname from message content and route as BOT_COMMAND.
 
@@ -946,4 +999,4 @@ class ChatNamespace(socketio.AsyncNamespace):
         )
 
 
-__all__ = ["GENERAL_GROUP", "ChatNamespace"]
+__all__ = ["GENERAL_GROUP", "ChatNamespace", "WebhookError"]
