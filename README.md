@@ -39,7 +39,7 @@ MeadowServer (ASGI entrypoint)
 
 ### Middleware stack
 
-1. **MeadowServer** (`app.py`) — intercepts `POST /r/{group_id}` for the webhook; everything else passes through.
+1. **MeadowServer** (`app.py`) — intercepts `POST /r/{group_id}` for the webhook (handles its own JWT verification); everything else passes through.
 2. **AuthASGIApp** (`auth.py`) — HTTP-level JWT gate. `/socket.io` always passes through (Engine.IO transport). Paths starting with `/chat` require a valid `Authorization: Bearer <jwt>` header.
 3. **socketio.ASGIApp** — standard Socket.IO transport.
 4. **ChatNamespace** (`namespace.py`) — the `/chat` namespace handler. All application logic lives here.
@@ -55,6 +55,8 @@ All mutable state lives on the `Hub` instance — never in module globals:
 | `bot_registry` | `dict[str, dict]` | Registered bots (keyed by bot_name) |
 | `groups` | `dict[str, GroupState]` | Active groups (keyed by group_id) |
 | `pattern_registry` | `dict[str, list]` | Registered regex patterns (keyed by scope) |
+| `bot_rate_limits` | `dict[str, list[float]]` | Per-bot sliding window timestamps for rate limiting |
+| `rate_limited_bots` | `dict[str, float]` | Per-bot cooldown expiry (monotonic) for rate limiting |
 | `persistence` | `JSONLPersistence` | Append-only JSONL message store |
 | `ntfy_prefs` | `NtfyPrefsStore` | Per-user ntfy notification preferences |
 
@@ -132,7 +134,7 @@ emits `authenticate` with a JWT, then interacts via events.
 |---|---|---|
 | `connect` | client -> server | Establishes WebSocket connection |
 | `authenticate` | client -> server | JWT handshake. Server responds with `authenticated` (user) or `bot_authenticated` (bot), then sends `group_list`, `bot_list`, `my_permissions`, and auto-joins `general`. |
-| `disconnect` | client -> server | Server cleans up session and leaves all rooms. |
+| `disconnect` | client -> server | Server cleans up session and leaves all rooms. If the client was a bot, it's removed from `bot_registry`, rate limit state is cleared, and `bot_unregistered` + `bot_list` are broadcast to all clients. |
 
 ### Message types
 
@@ -185,7 +187,7 @@ Messages carry a `type` field that identifies their origin:
 
 | Event | Direction | Auth | Description |
 |---|---|---|---|
-| `register_bot` | client -> server | bot only | Register bot metadata (description, commands, context_limit). Identity comes from JWT, not payload. |
+| `register_bot` | client -> server | bot only | Register bot metadata (description, commands, context_limit). Identity comes from JWT, not payload. Server broadcasts `bot_list` to all connected clients after registration. |
 | `bot_list_bots` | client -> server | yes | Returns `bot_list` with all registered bots. |
 
 ### Rate limiting (bot messages)
@@ -284,8 +286,9 @@ All messages (user, bot, webhook, reaction) share the same envelope from
 | `pattern_registered` | Pattern registration confirmed |
 | `pattern_unregistered` | Pattern removed |
 | `pattern_matched` | Regex pattern matched a message |
-| `bot_unregistered` | Bot disconnected (broadcast to other bots) |
-| `bot_not_found` | @mention targets a non-existent bot |
+| `bot_unregistered` | Bot disconnected (broadcast to all connected clients) |
+| `bot_not_found` | @mention targets neither a registered bot nor a known user in the group |
+| `rate_limited` | Bot exceeded rate limit (30 msg/min), enters 60s cooldown |
 | `ntfy_prefs` | ntfy preferences returned |
 | `ntfy_prefs_saved` | ntfy preferences saved |
 | `error` | Generic error |
@@ -400,7 +403,10 @@ server runs `_dispatch_message()`:
 1. **Broadcast** — emit `message` to the group room via the chokepoint
 2. **Persist** — append to the group's JSONL file
 3. **@bot routing** — parse `@botname command args` from content, emit
-   `bot_command` to the named bot with thread context
+   `bot_command` to the named bot with thread context. If the name matches
+   a known user in the group, it's silently treated as a user mention. If
+   it matches neither a bot nor a user, `bot_not_found` is emitted to the
+   sender.
 4. **Pattern evaluation** — run all registered regex patterns against the
    content, emit `pattern_matched` to registering bots
 
