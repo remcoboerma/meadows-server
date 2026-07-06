@@ -37,6 +37,9 @@ TYPING_COOLDOWN_SECONDS = 1.0
 MAX_PATTERNS_PER_BOT = 50
 MAX_PATTERN_LENGTH = 512
 MAX_WEBHOOK_CONTENT = 100_000
+RATE_LIMIT_MAX_MESSAGES = 30
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 _GROUP_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
@@ -79,6 +82,11 @@ class ChatNamespace(socketio.AsyncNamespace):
         super().__init__(namespace)
         self.hub = hub
         self._typing_last: dict[str, float] = {}
+        # Rate limiting: per-bot sliding window + cooldown.
+        # _rate_bot_timestamps[bot_name] = list of send timestamps within the window.
+        # _rate_bot_cooldown[bot_name] = monotonic time when cooldown expires.
+        self._rate_bot_timestamps: dict[str, list[float]] = {}
+        self._rate_bot_cooldown: dict[str, float] = {}
 
     # -- connect / disconnect ---------------------------------------------
 
@@ -88,6 +96,11 @@ class ChatNamespace(socketio.AsyncNamespace):
     async def on_disconnect(self, sid: str) -> None:
         session = self.hub.user_sessions.pop(sid, None)
         if session:
+            claims = session.get("claims")
+            if claims and claims.is_bot():
+                bot_name = claims.bot_name or claims.sub
+                self._rate_bot_timestamps.pop(bot_name, None)
+                self._rate_bot_cooldown.pop(bot_name, None)
             for group_id in list(session.get("group_ids", set())):
                 await self._leave_group(sid, group_id, session=session)
         self._typing_last.pop(sid, None)
@@ -204,6 +217,10 @@ class ChatNamespace(socketio.AsyncNamespace):
         claims = session["claims"]
         if not claims.is_bot():
             await self.hub.emit_frame(EventName.ERROR, {"error": "only bots may emit bot_response"}, sid=sid)
+            return
+        bot_name = claims.bot_name or claims.sub
+        if not self._check_rate_limit(bot_name):
+            await self.hub.emit_frame(EventName.RATE_LIMITED, {"bot_name": bot_name}, sid=sid)
             return
         msg = self._build_message(data, claims, MessageType.BOT)
         await self._dispatch_message(msg)
@@ -794,6 +811,37 @@ class ChatNamespace(socketio.AsyncNamespace):
             await self.hub.emit_frame(EventName.ERROR, {"error": "not authenticated"}, sid=sid)
             return None
         return session
+
+    def _check_rate_limit(self, bot_name: str) -> bool:
+        """Check and update rate limit state for a bot.
+
+        Sliding window: max ``RATE_LIMIT_MAX_MESSAGES`` messages per
+        ``RATE_LIMIT_WINDOW_SECONDS``. On violation the bot enters a
+        cooldown of ``RATE_LIMIT_COOLDOWN_SECONDS``.
+
+        Returns ``True`` if the bot is allowed to send, ``False`` if
+        rate-limited.
+        """
+        now = time.monotonic()
+
+        # Check cooldown
+        cooldown_until = self._rate_bot_cooldown.get(bot_name, 0.0)
+        if now < cooldown_until:
+            return False
+
+        # Prune timestamps outside the sliding window
+        timestamps = self._rate_bot_timestamps.setdefault(bot_name, [])
+        cutoff = now - RATE_LIMIT_WINDOW_SECONDS
+        self._rate_bot_timestamps[bot_name] = [t for t in timestamps if t > cutoff]
+        timestamps = self._rate_bot_timestamps[bot_name]
+
+        if len(timestamps) >= RATE_LIMIT_MAX_MESSAGES:
+            # Enter cooldown
+            self._rate_bot_cooldown[bot_name] = now + RATE_LIMIT_COOLDOWN_SECONDS
+            return False
+
+        timestamps.append(now)
+        return True
 
     async def _join_group(self, sid: str, group_id: str) -> None:
         """Join a group: enter room, add to members, send history + notify room.

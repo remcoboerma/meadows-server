@@ -150,6 +150,70 @@ class TestMessage:
         assert len(fake_sio.events(EventName.ERROR.value)) == 1
 
 
+class TestBotRateLimit:
+    async def test_bot_response_allowed_under_limit(self, hub, fake_sio, bot_token):
+        await hub.namespace.on_connect("sid-bot", {})
+        await hub.namespace.on_authenticate("sid-bot", {"token": bot_token(name="echo")})
+
+        await hub.namespace.on_bot_response("sid-bot", _wire("pong", user_id="bot-echo"))
+
+        assert len(fake_sio.events(EventName.MESSAGE.value)) == 1
+        assert fake_sio.events(EventName.RATE_LIMITED.value) == []
+
+    async def test_bot_response_blocked_at_limit(self, hub, fake_sio, bot_token):
+        from meadows.server.namespace import RATE_LIMIT_MAX_MESSAGES
+
+        await hub.namespace.on_connect("sid-bot", {})
+        await hub.namespace.on_authenticate("sid-bot", {"token": bot_token(name="echo")})
+
+        # Exhaust the sliding window
+        for _ in range(RATE_LIMIT_MAX_MESSAGES):
+            await hub.namespace.on_bot_response("sid-bot", _wire("msg", user_id="bot-echo"))
+        fake_sio.emits.clear()
+
+        # Next one should be rate-limited
+        await hub.namespace.on_bot_response("sid-bot", _wire("over", user_id="bot-echo"))
+
+        assert fake_sio.events(EventName.MESSAGE.value) == []
+        rate_events = fake_sio.events(EventName.RATE_LIMITED.value)
+        assert len(rate_events) == 1
+        assert rate_events[0]["data"]["bot_name"] == "echo"
+
+    async def test_rate_limit_state_cleared_on_disconnect(self, hub, fake_sio, bot_token):
+        from meadows.server.namespace import RATE_LIMIT_MAX_MESSAGES
+
+        await hub.namespace.on_connect("sid-bot", {})
+        await hub.namespace.on_authenticate("sid-bot", {"token": bot_token(name="echo")})
+
+        # Exhaust the window
+        for _ in range(RATE_LIMIT_MAX_MESSAGES):
+            await hub.namespace.on_bot_response("sid-bot", _wire("msg", user_id="bot-echo"))
+
+        # Disconnect — clears rate limit state
+        await hub.namespace.on_disconnect("sid-bot")
+
+        # Reconnect
+        await hub.namespace.on_connect("sid-bot-2", {})
+        await hub.namespace.on_authenticate("sid-bot-2", {"token": bot_token(name="echo")})
+        fake_sio.emits.clear()
+
+        # Should be allowed again
+        await hub.namespace.on_bot_response("sid-bot-2", _wire("fresh", user_id="bot-echo"))
+
+        assert len(fake_sio.events(EventName.MESSAGE.value)) == 1
+
+    async def test_user_message_not_rate_limited(self, hub, fake_sio, user_token):
+        """Only bot_response is rate-limited, not user messages."""
+        await hub.namespace.on_connect("sid-1", {})
+        await hub.namespace.on_authenticate("sid-1", {"token": user_token()})
+
+        for _ in range(50):
+            await hub.namespace.on_message("sid-1", _wire("spam"))
+
+        assert len(fake_sio.events(EventName.MESSAGE.value)) == 50
+        assert fake_sio.events(EventName.RATE_LIMITED.value) == []
+
+
 class TestTyping:
     async def test_typing_broadcasts_user_typing(self, hub, fake_sio, user_token):
         await hub.namespace.on_connect("sid-1", {})
