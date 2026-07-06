@@ -428,6 +428,32 @@ server runs `_dispatch_message()`:
 4. **PEP 420 namespace** — `src/meadows/server/__init__.py` is fine; there is
    no `src/meadows/__init__.py` anywhere.
 
+## Commit conventions
+
+This project uses [Conventional Commits](https://www.conventionalcommits.org/).
+Each commit message describes one atomic change:
+
+```
+<type>(<scope>): <short summary>
+
+<body>  # optional
+```
+
+**Types:** `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `ci`
+
+**Scopes:** `server`, `protocol`, `client`, `bot`, `web`, `tui`, `tests`
+
+**Examples:**
+
+```
+feat(server): add inbound webhook endpoint POST /r/{group_id}
+feat(server): enforce bot rate limiting (30 msg/min, 60s cooldown)
+fix(server): enforce POST-only on webhook endpoint
+docs: expand README with Socket.IO API reference
+test(server): add webhook endpoint tests (29 tests)
+refactor(server): extract _check_rate_limit helper
+```
+
 ## Test
 
 ```bash
