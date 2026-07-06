@@ -190,17 +190,17 @@ Messages carry a `type` field that identifies their origin:
 
 ### Rate limiting (bot messages)
 
-Rate limiting is **declared in the protocol** (`RATE_LIMITED` event) but
-**not yet implemented** in the server. The monolith enforced 30 messages
-per minute per bot with a 60-second cooldown; this will be ported in a
-future iteration.
-
-| Limit | Value | Status |
+| Limit | Value | Scope |
 |---|---|---|
-| Messages per minute | 30 (sliding window per bot) | not yet enforced |
-| Cooldown on violation | 60 seconds | not yet enforced |
-| Max patterns per scope | 50 | enforced |
-| Max pattern pattern length | 512 chars | enforced |
+| Max messages per window | 30 | per bot (sliding 60s window) |
+| Cooldown on violation | 60 seconds | per bot |
+| Max patterns per scope | 50 | per scope-key (room or global) |
+| Max pattern length | 512 chars | — |
+
+When a bot exceeds 30 messages in 60 seconds, the server emits
+`rate_limited` to the bot and skips broadcasting the message. The bot
+enters a 60-second cooldown during which all `bot_response` events are
+rejected. Rate limit state is cleared when the bot disconnects.
 
 ### Message envelope
 
@@ -312,10 +312,6 @@ Content-Type: application/json
 ```
 
 **Auth:** Any valid JWT (user or bot). No specific permission required.
-
-**Note:** The server intercepts all HTTP methods on `/r/*`, but the
-intended usage is `POST`. Other methods will attempt to parse the body
-as JSON and may produce unexpected results.
 
 **Body:**
 
