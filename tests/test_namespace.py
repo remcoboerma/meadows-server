@@ -293,3 +293,78 @@ class TestDisconnect:
         assert ("sid-1", "general", "/chat") in fake_sio.rooms_left
         # members is keyed by user_id, not sid
         assert "user-alice" not in hub.groups[GENERAL_GROUP].members
+
+    async def test_bot_disconnect_clears_registry_and_broadcasts(self, hub, fake_sio, bot_token):
+        """BUSINESS RULE (monolith sioserver.py:78-83): when a bot disconnects,
+        remove it from bot_registry, broadcast BOT_UNREGISTERED and updated
+        BOT_LIST so the UI stops showing the offline bot."""
+        await hub.namespace.on_connect("bot-sid", {})
+        await hub.namespace.on_authenticate("bot-sid", {"token": bot_token(name="helper")})
+        assert "helper" in hub.bot_registry
+
+        await hub.namespace.on_disconnect("bot-sid")
+
+        assert "helper" not in hub.bot_registry
+        unreg = fake_sio.events(EventName.BOT_UNREGISTERED.value)
+        assert len(unreg) == 1
+        assert unreg[0]["data"]["bot_name"] == "helper"
+        bot_list = fake_sio.events(EventName.BOT_LIST.value)
+        assert len(bot_list) == 1
+        assert bot_list[0]["data"]["bots"] == []
+
+
+class TestBotRouting:
+    """Route @mentions to bots, emit bot_not_found for unknowns, skip known users.
+
+    BUSINESS RULE (monolith sioserver.py:1645-1672): the server parses @name from
+    message content. If name matches a registered bot → route BOT_COMMAND. If it
+    matches a known user in the group → silent (valid mention). Otherwise →
+    bot_not_found to the sender.
+    """
+
+    async def test_known_bot_routes_command(self, hub, fake_sio, bot_token, user_token):
+        """BUSINESS RULE: @registered_bot command → BOT_COMMAND to the bot's SID."""
+        await hub.namespace.on_connect("bot-sid", {})
+        await hub.namespace.on_authenticate("bot-sid", {"token": bot_token(name="helper")})
+        await hub.namespace.on_register_bot("bot-sid", {"description": "helper bot", "commands": []})
+
+        await hub.namespace.on_connect("user-sid", {})
+        await hub.namespace.on_authenticate("user-sid", {"token": user_token(name="alice")})
+        await hub.namespace.on_message("user-sid", _wire("@helper ping", user_id="user-alice"))
+
+        cmd = fake_sio.events(EventName.BOT_COMMAND.value)
+        assert len(cmd) == 1
+        assert cmd[0]["to"] == "bot-sid"
+        assert cmd[0]["data"]["command"] == "ping"
+        assert cmd[0]["data"]["args"] == []
+
+    async def test_unknown_name_emits_bot_not_found(self, hub, fake_sio, user_token):
+        """BUSINESS RULE: @nonexistent command → bot_not_found to sender."""
+        await hub.namespace.on_connect("user-sid", {})
+        await hub.namespace.on_authenticate("user-sid", {"token": user_token(name="alice")})
+        await hub.namespace.on_message("user-sid", _wire("@nobody hello", user_id="user-alice"))
+
+        not_found = fake_sio.events(EventName.BOT_NOT_FOUND.value)
+        assert len(not_found) == 1
+        assert not_found[0]["to"] == "user-sid"
+        assert not_found[0]["data"]["bot_name"] == "nobody"
+
+    async def test_known_user_mention_does_not_emit_bot_not_found(self, hub, fake_sio, user_token):
+        """BUSINESS RULE: @known_user mention → silent (no bot_not_found)."""
+        await hub.namespace.on_connect("user-sid1", {})
+        await hub.namespace.on_authenticate("user-sid1", {"token": user_token(name="alice")})
+        await hub.namespace.on_connect("user-sid2", {})
+        await hub.namespace.on_authenticate("user-sid2", {"token": user_token(name="bob")})
+        await hub.namespace.on_message("user-sid2", _wire("@alice hey", user_id="user-bob"))
+
+        not_found = fake_sio.events(EventName.BOT_NOT_FOUND.value)
+        assert not_found == []
+
+    async def test_plain_message_does_not_route(self, hub, fake_sio, user_token):
+        """No @mention → no routing at all."""
+        await hub.namespace.on_connect("user-sid", {})
+        await hub.namespace.on_authenticate("user-sid", {"token": user_token(name="alice")})
+        await hub.namespace.on_message("user-sid", _wire("hello everyone", user_id="user-alice"))
+
+        assert fake_sio.events(EventName.BOT_COMMAND.value) == []
+        assert fake_sio.events(EventName.BOT_NOT_FOUND.value) == []

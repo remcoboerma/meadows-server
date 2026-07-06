@@ -82,11 +82,6 @@ class ChatNamespace(socketio.AsyncNamespace):
         super().__init__(namespace)
         self.hub = hub
         self._typing_last: dict[str, float] = {}
-        # Rate limiting: per-bot sliding window + cooldown.
-        # _rate_bot_timestamps[bot_name] = list of send timestamps within the window.
-        # _rate_bot_cooldown[bot_name] = monotonic time when cooldown expires.
-        self._rate_bot_timestamps: dict[str, list[float]] = {}
-        self._rate_bot_cooldown: dict[str, float] = {}
 
     # -- connect / disconnect ---------------------------------------------
 
@@ -99,8 +94,16 @@ class ChatNamespace(socketio.AsyncNamespace):
             claims = session.get("claims")
             if claims and claims.is_bot():
                 bot_name = claims.bot_name or claims.sub
-                self._rate_bot_timestamps.pop(bot_name, None)
-                self._rate_bot_cooldown.pop(bot_name, None)
+                self.hub.bot_rate_limits.pop(bot_name, None)
+                self.hub.rate_limited_bots.pop(bot_name, None)
+                removed = self.hub.bot_registry.pop(bot_name, None)
+                if removed:
+                    await self.hub.emit_frame(EventName.BOT_UNREGISTERED, {"bot_name": bot_name})
+                    bots_list = [
+                        {"name": name, "description": info.get("description", ""), "commands": info.get("commands", [])}
+                        for name, info in self.hub.bot_registry.items()
+                    ]
+                    await self.hub.emit_frame(EventName.BOT_LIST, {"bots": bots_list})
             for group_id in list(session.get("group_ids", set())):
                 await self._leave_group(sid, group_id, session=session)
         self._typing_last.pop(sid, None)
@@ -208,7 +211,7 @@ class ChatNamespace(socketio.AsyncNamespace):
         msg = self._build_message(data, claims, MessageType.USER if claims.is_user() else MessageType.BOT)
         if parse_everyone(msg.content) and "mention-all" in claims.permissions:
             msg.is_everyone = True
-        await self._dispatch_message(msg)
+        await self._dispatch_message(msg, sid=sid)
 
     async def on_bot_response(self, sid: str, data: dict) -> None:
         session = await self._require_auth(sid)
@@ -223,7 +226,7 @@ class ChatNamespace(socketio.AsyncNamespace):
             await self.hub.emit_frame(EventName.RATE_LIMITED, {"bot_name": bot_name}, sid=sid)
             return
         msg = self._build_message(data, claims, MessageType.BOT)
-        await self._dispatch_message(msg)
+        await self._dispatch_message(msg, sid=sid)
 
     async def on_typing(self, sid: str, data: dict) -> None:
         session = await self._require_auth(sid)
@@ -802,6 +805,11 @@ class ChatNamespace(socketio.AsyncNamespace):
             "context_limit": context_limit,
         }
         await self.hub.emit_frame(EventName.BOT_REGISTERED, {"bot_name": bot_name}, sid=sid)
+        bots_list = [
+            {"name": name, "description": info.get("description", ""), "commands": info.get("commands", [])}
+            for name, info in self.hub.bot_registry.items()
+        ]
+        await self.hub.emit_frame(EventName.BOT_LIST, {"bots": bots_list})
 
     # -- helpers ----------------------------------------------------------
 
@@ -825,19 +833,19 @@ class ChatNamespace(socketio.AsyncNamespace):
         now = time.monotonic()
 
         # Check cooldown
-        cooldown_until = self._rate_bot_cooldown.get(bot_name, 0.0)
+        cooldown_until = self.hub.rate_limited_bots.get(bot_name, 0.0)
         if now < cooldown_until:
             return False
 
         # Prune timestamps outside the sliding window
-        timestamps = self._rate_bot_timestamps.setdefault(bot_name, [])
+        timestamps = self.hub.bot_rate_limits.setdefault(bot_name, [])
         cutoff = now - RATE_LIMIT_WINDOW_SECONDS
-        self._rate_bot_timestamps[bot_name] = [t for t in timestamps if t > cutoff]
-        timestamps = self._rate_bot_timestamps[bot_name]
+        self.hub.bot_rate_limits[bot_name] = [t for t in timestamps if t > cutoff]
+        timestamps = self.hub.bot_rate_limits[bot_name]
 
         if len(timestamps) >= RATE_LIMIT_MAX_MESSAGES:
             # Enter cooldown
-            self._rate_bot_cooldown[bot_name] = now + RATE_LIMIT_COOLDOWN_SECONDS
+            self.hub.rate_limited_bots[bot_name] = now + RATE_LIMIT_COOLDOWN_SECONDS
             return False
 
         timestamps.append(now)
@@ -923,7 +931,7 @@ class ChatNamespace(socketio.AsyncNamespace):
             payload["bot_name"] = claims.bot_name
         return message_from_wire(payload)
 
-    async def _dispatch_message(self, msg: Message) -> None:
+    async def _dispatch_message(self, msg: Message, *, sid: str | None = None) -> None:
         """Broadcast a message, persist it, route @bot mentions, evaluate patterns.
 
         BUSINESS RULE (MEADOWS §3.3 line 73-74): reactions, mentions, replies,
@@ -945,7 +953,7 @@ class ChatNamespace(socketio.AsyncNamespace):
         await self.hub.persistence.store(msg.group_id, msg)
 
         # Route @bot mentions
-        await self._route_bot_commands(msg)
+        await self._route_bot_commands(msg, sid=sid)
 
         # Evaluate registered patterns
         await self._evaluate_patterns(msg.group_id, msg)
@@ -993,7 +1001,7 @@ class ChatNamespace(socketio.AsyncNamespace):
         await self._dispatch_message(msg)
         return msg.id
 
-    async def _route_bot_commands(self, msg: Message) -> None:
+    async def _route_bot_commands(self, msg: Message, *, sid: str | None = None) -> None:
         """Parse @botname from message content and route as BOT_COMMAND.
 
         BUSINESS RULE (MEADOWS §3.3 line 73): @bot routing is core —
@@ -1002,6 +1010,11 @@ class ChatNamespace(socketio.AsyncNamespace):
         routing-machinerie: the server doesn't know what the bot does
         with the command, it just routes it. The bot's should_handle/
         handle decides whether and how to respond.
+
+        BUSINESS RULE (monolith sioserver.py:1645-1672): if the mentioned
+        name is neither a registered bot nor a known user in the group,
+        emit bot_not_found to the sender. This prevents silent failure
+        when a user mistypes @botname.
 
         BUSINESS RULE (MEADOWS §5 line 130): the bot author never writes
         this routing. The server constructs the BOT_COMMAND payload with
@@ -1020,31 +1033,51 @@ class ChatNamespace(socketio.AsyncNamespace):
         match = re.match(r"@(\w+)\s+(.*)", content)
         if not match:
             return
-        bot_name = match.group(1)
-        if bot_name not in self.hub.bot_registry:
+        mentioned = match.group(1)
+        if mentioned in self.hub.bot_registry:
+            bot_info = self.hub.bot_registry[mentioned]
+            bot_sid = bot_info.get("sid")
+            if bot_sid:
+                rest = match.group(2).strip()
+                parts = rest.split(None, 1)
+                command = parts[0] if parts else ""
+                args_str = parts[1] if len(parts) > 1 else ""
+                args = args_str.split() if args_str else []
+                context_limit = bot_info.get("context_limit", 30)
+                thread_context = await self.hub.persistence.load_thread_context(msg.group_id, context_limit)
+                await self.hub.emit_frame(
+                    EventName.BOT_COMMAND,
+                    {
+                        "command": command,
+                        "args": args,
+                        "raw_args": [args_str] if args_str else [],
+                        "message": message_to_wire(msg),
+                        "thread_context": thread_context,
+                    },
+                    sid=bot_sid,
+                )
             return
-        bot_info = self.hub.bot_registry[bot_name]
-        bot_sid = bot_info.get("sid")
-        if not bot_sid:
-            return
-        rest = match.group(2).strip()
-        parts = rest.split(None, 1)
-        command = parts[0] if parts else ""
-        args_str = parts[1] if len(parts) > 1 else ""
-        args = args_str.split() if args_str else []
-        context_limit = bot_info.get("context_limit", 30)
-        thread_context = await self.hub.persistence.load_thread_context(msg.group_id, context_limit)
-        await self.hub.emit_frame(
-            EventName.BOT_COMMAND,
-            {
-                "command": command,
-                "args": args,
-                "raw_args": [args_str] if args_str else [],
-                "message": message_to_wire(msg),
-                "thread_context": thread_context,
-            },
-            sid=bot_sid,
-        )
+
+        # Not a bot — check if it's a known user in the group
+        if msg.group_id in self.hub.groups:
+            state = self.hub.groups[msg.group_id]
+            for member_key, member_info in state.members.items():
+                if member_key.startswith("bot-"):
+                    continue
+                username = member_info.get("username", member_key) if isinstance(member_info, dict) else member_key
+                if username.lower() == mentioned.lower():
+                    return  # Known user mention — no error
+
+        # Neither bot nor user — notify the sender
+        if sid:
+            await self.hub.emit_frame(
+                EventName.BOT_NOT_FOUND,
+                {
+                    "bot_name": mentioned,
+                    "message": f"Bot '{mentioned}' not found in this group",
+                },
+                sid=sid,
+            )
 
 
 __all__ = ["GENERAL_GROUP", "ChatNamespace", "WebhookError"]

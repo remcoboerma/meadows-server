@@ -55,6 +55,8 @@ class Hub:
         self.bot_registry: dict[str, dict[str, Any]] = {}
         self.groups: dict[str, GroupState] = {}
         self.pattern_registry: dict[str, list[dict[str, Any]]] = {}
+        self.bot_rate_limits: dict[str, list[float]] = {}
+        self.rate_limited_bots: dict[str, float] = {}
 
         self.persistence = JSONLPersistence(self.messages_dir)
         # BUSINESS RULE (§3.3): ntfy prefs stored per-user; the server owns
