@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from endow import Service
+
 DEFAULT_PREFS: dict = {
     "enabled": False,
     "server": "",
@@ -25,7 +27,7 @@ DEFAULT_PREFS: dict = {
 }
 
 
-class NtfyPrefsStore:
+class NtfyPrefsStore(Service):
     """Per-user ntfy preferences, stored as a single JSON file.
 
     The file is keyed by user_id (the JWT `sub` claim, e.g. `user-alice`).
@@ -33,9 +35,12 @@ class NtfyPrefsStore:
     created on first save, not on construction.
     """
 
-    def __init__(self, prefs_path: Path) -> None:
-        self.prefs_path = Path(prefs_path)
-        self.prefs_path.parent.mkdir(parents=True, exist_ok=True)
+    prefs_path: Path
+
+    def __init__(self, prefs_path: Path | None = None) -> None:
+        if prefs_path is not None:
+            self.prefs_path = Path(prefs_path)
+            self.prefs_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _load_all(self) -> dict[str, dict]:
         if not self.prefs_path.exists():

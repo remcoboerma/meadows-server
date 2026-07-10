@@ -84,8 +84,7 @@ def _validate_permissions(permissions: list[str]) -> list[str]:
 @task
 def setup(c: Context) -> None:
     """Configure environment for meadows-server."""
-    if hasattr(c, "sudo"):
-        c.sudo("chmod +x captain-hooks/*.sh")
+    c.run("chmod +x captain-hooks/*.sh", warn=True)
 
     _check_env("MEADOWS_HOST", default="0.0.0.0", comment="Host to bind the ASGI server to")
     _check_env("MEADOWS_PORT", default="8080", comment="Port to bind the ASGI server to")

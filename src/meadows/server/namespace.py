@@ -12,6 +12,7 @@ control events (AUTHENTICATED, JOINED_GROUP, AUTH_ERROR, ...) — goes through
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from datetime import datetime, timezone
@@ -23,11 +24,13 @@ import socketio
 from meadows.protocol import EventName, Message, MessageType, build_claims, parse_everyone
 from meadows.protocol.codec import message_from_wire
 from meadows.protocol.jwt import ALGORITHM, JWTRole, JWTClaims
+from meadows.protocol.labels import MAX_LABEL_METADATA_LENGTH
 from meadows.protocol.permissions import AVAILABLE_PERMISSIONS
 
 from meadows.server.auth import AuthError, verify_token
 from meadows.server.chokepoint import message_to_wire
 from meadows.server.groups import GroupState
+from meadows.server.label_evaluator import evaluate_label_subscriptions
 
 if TYPE_CHECKING:
     from meadows.server.hub import Hub
@@ -735,7 +738,7 @@ class ChatNamespace(socketio.AsyncNamespace):
 
     # -- bot discovery & fetch --------------------------------------------
 
-    async def on_bot_list_bots(self, sid: str, data: dict) -> None:
+    async def on_bot_list_bots(self, sid: str, data: dict | None = None) -> None:
         """Send the list of registered bots to the requesting client."""
         del data  # unused: no parameters
         session = await self._require_auth(sid)
@@ -810,6 +813,224 @@ class ChatNamespace(socketio.AsyncNamespace):
             for name, info in self.hub.bot_registry.items()
         ]
         await self.hub.emit_frame(EventName.BOT_LIST, {"bots": bots_list})
+
+    # -- label subscriptions -----------------------------------------------
+
+    async def on_register_label_subscription(self, sid: str, data: dict) -> None:
+        """Register a label subscription.
+
+        BUSINESS RULE (MEADOWS-labeling-intent §2.3): a client registers a
+        JSON Logic predicate against label data.  The server evaluates
+        subscriptions against all labels on each message.
+        """
+        session = await self._require_auth(sid)
+        if session is None:
+            return
+        claims = session.get("claims")
+        # Only bots for now (§2.4)
+        if not claims or not claims.is_bot():
+            await self.hub.emit_frame(EventName.ERROR, {"error": "only bots can register label subscriptions"}, sid=sid)
+            return
+
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        predicate = data.get("predicate", {}) if isinstance(data, dict) else {}
+        scope = data.get("scope", "room") if isinstance(data, dict) else "room"
+        group_id = data.get("group_id") if isinstance(data, dict) else None
+        deliver = data.get("deliver", "label_only") if isinstance(data, dict) else "label_only"
+
+        if not name:
+            await self.hub.emit_frame(EventName.ERROR, {"error": "subscription name required"}, sid=sid)
+            return
+        if deliver not in ("label_only", "message_only", "both"):
+            await self.hub.emit_frame(EventName.ERROR, {"error": f"invalid deliver mode: {deliver}"}, sid=sid)
+            return
+
+        storage_key = "*" if scope == "global" else (group_id or GENERAL_GROUP)
+        entry = {
+            "name": name,
+            "predicate": predicate,
+            "deliver": deliver,
+            "scope": scope,
+            "group_id": storage_key,
+            "bot_id": claims.bot_name or claims.sub,
+            "bot_sid": sid,
+            "registered_at": time.time(),
+        }
+        entries = self.hub.label_subscriptions.setdefault(storage_key, [])
+        entries.append(entry)
+        await self.hub.emit_frame(EventName.LABEL_SUBSCRIPTION_REGISTERED, {"name": name}, sid=sid)
+
+    async def on_unregister_label_subscription(self, sid: str, data: dict) -> None:
+        """Remove a previously registered label subscription by name."""
+        session = await self._require_auth(sid)
+        if session is None:
+            return
+        name = data.get("name", "") if isinstance(data, dict) else ""
+        for key, entries in self.hub.label_subscriptions.items():
+            self.hub.label_subscriptions[key] = [e for e in entries if e["name"] != name]
+        await self.hub.emit_frame(EventName.LABEL_SUBSCRIPTION_UNREGISTERED, {"name": name}, sid=sid)
+
+    async def on_label_assigned(self, sid: str, data: dict) -> None:
+        """Receive labels from a bot — dedup, store, cascade.
+
+        BUSINESS RULE (MEADOWS-labeling-intent §2.5): bot-produced labels
+        enter the same pipeline as server-produced labels.  Dedup prevents
+        cycles.
+        """
+        session = await self._require_auth(sid)
+        if session is None:
+            return
+
+        labels_raw = data.get("labels", []) if isinstance(data, dict) else []
+        target_msg_id = data.get("target_msg_id", "") if isinstance(data, dict) else ""
+        applied_by = data.get("applied_by", "") if isinstance(data, dict) else ""
+
+        # Validate and dedup each label
+        new_labels = []
+        for lbl in labels_raw:
+            if not isinstance(lbl, (list, tuple)) or len(lbl) < 3:
+                continue
+            origin, label_name, semver = str(lbl[0]), str(lbl[1]), str(lbl[2])
+            metadata = lbl[3] if len(lbl) > 3 else None
+
+            # Validate metadata size
+            if metadata is not None:
+                import json
+
+                size = len(json.dumps(metadata))
+                if size > MAX_LABEL_METADATA_LENGTH:
+                    await self.hub.emit_frame(
+                        EventName.ERROR, {"error": f"label metadata too large ({size} chars)"}, sid=sid
+                    )
+                    continue
+
+            # Dedup check (§2.5): key is (origin, label, semver, message_id)
+            if not self.hub.label_dedup.add(origin, label_name, semver, target_msg_id):
+                continue  # duplicate
+
+            new_labels.append({"origin": origin, "label": label_name, "semver": semver, "metadata": metadata})
+
+        if not new_labels:
+            return
+
+        # Persist LABEL_ASSIGNED as a separate JSONL record.
+        # BUSINESS RULE (§2.9): LABEL_ASSIGNED events are stored as
+        # separate records.  Auto-room-labels are NOT persisted (the
+        # room is already in the filename).
+        group_id = self._find_group_for_message(target_msg_id)
+        label_record = {
+            "event": "label_assigned",
+            "labels": new_labels,
+            "target_msg_id": target_msg_id,
+            "applied_by": applied_by,
+        }
+        await self.hub.persistence.store_label_assigned(group_id, label_record)
+
+        # Evaluate subscriptions against new labels
+        await self._evaluate_and_deliver_labels(target_msg_id, new_labels, applied_by, cascade=True)
+
+    async def _evaluate_and_deliver_labels(
+        self,
+        target_msg_id: str,
+        labels: list[dict[str, Any]],
+        applied_by: str,
+        *,
+        cascade: bool = False,
+    ) -> None:
+        """Evaluate all subscriptions and deliver matched labels.
+
+        BUSINESS RULE (§2.5): cascade until fixed point is handled by the
+        caller — this method handles one pass.
+
+        BUSINESS RULE: when ``cascade=True`` (called from on_label_assigned),
+        ``message_only`` delivery is suppressed.  Only ``label_only`` and
+        ``both`` deliver LABEL_ASSIGNED.  This prevents the cascade loop
+        where: auto-room-label → message_only → bot produces label →
+        message_only again → bot produces label again → ∞.
+        """
+        all_subs = [e for entries in self.hub.label_subscriptions.values() for e in entries]
+        if not all_subs:
+            return
+
+        msg = Message(type=MessageType.SYSTEM, user_id="system", group_id="general", content="")
+        matches = evaluate_label_subscriptions(all_subs, labels, msg)
+        if not matches:
+            return
+
+        # Build lookup: subscription name → entry
+        sub_lookup = {e["name"]: e for entries in self.hub.label_subscriptions.values() for e in entries}
+
+        for sub_name, matched_labels in matches.items():
+            await self._deliver_to_subscriber(
+                sub_lookup.get(sub_name), sub_name, matched_labels, target_msg_id, applied_by,
+                cascade=cascade,
+            )
+
+    def _find_group_for_message(self, message_id: str) -> str:
+        """Find the group_id for a message_id by scanning JSONL files.
+
+        BUSINESS RULE: this is a PoC implementation. A production system
+        would maintain a message_id → group_id index. For now, scan the
+        groups since the volume is small.
+        """
+        for group_id in self.hub.groups:
+            path = self.hub.persistence._path(group_id)
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    msg = json.loads(line)
+                    if msg.get("id") == message_id:
+                        return group_id
+                except json.JSONDecodeError:
+                    continue
+        return GENERAL_GROUP
+
+    async def _deliver_to_subscriber(
+        self,
+        sub_entry: dict[str, Any] | None,
+        sub_name: str,
+        matched_labels: list[dict[str, Any]],
+        target_msg_id: str,
+        applied_by: str,
+        *,
+        cascade: bool = False,
+    ) -> None:
+        """Deliver matched labels to a single subscriber.
+
+        BUSINESS RULE (§2.5): when cascade=True (bot-produced labels),
+        message_only delivery is suppressed to prevent infinite loops.
+        Only label_only and both deliver LABEL_ASSIGNED during cascade.
+        """
+        if not sub_entry:
+            return
+        bot_sid = sub_entry.get("bot_sid")
+        if not bot_sid:
+            return
+
+        deliver = sub_entry.get("deliver", "label_only")
+        label_payload = {
+            "labels": matched_labels,
+            "target_msg_id": target_msg_id,
+            "applied_by": applied_by,
+            "subscription_name": sub_name,
+        }
+
+        if deliver in ("label_only", "both"):
+            await self.hub.emit_frame(EventName.LABEL_ASSIGNED, label_payload, sid=bot_sid)
+
+        if not cascade and deliver in ("message_only", "both"):
+            # BUSINESS RULE (§2.3): deliver modes control what the
+            # subscriber receives.  "message_only" sends the full
+            # MESSAGE event so bots that need content can analyze it.
+            # Only for initial dispatch, not cascade passes.
+            messages = await self.hub.persistence.load_by_ids(
+                self._find_group_for_message(target_msg_id), [target_msg_id]
+            )
+            if messages:
+                await self.hub.emit_frame(EventName.MESSAGE, messages[0], sid=bot_sid)
 
     # -- helpers ----------------------------------------------------------
 
@@ -923,7 +1144,13 @@ class ChatNamespace(socketio.AsyncNamespace):
     def _build_message(self, data: dict, claims: Any, msg_type: MessageType) -> Message:
         payload = dict(data) if isinstance(data, dict) else {}
         # Trust the server-verified identity, never the client's self-assertion.
-        payload["type"] = msg_type
+        # Preserve RPC type from wire data if present — the caller only knows
+        # user/bot, but RPC messages declare their own type.
+        wire_type = payload.get("type")
+        if wire_type in (MessageType.RPC_REQUEST.value, MessageType.RPC_RESPONSE.value):
+            payload["type"] = wire_type
+        else:
+            payload["type"] = msg_type
         payload["user_id"] = claims.sub
         if claims.is_user():
             payload["username"] = claims.username
@@ -940,6 +1167,11 @@ class ChatNamespace(socketio.AsyncNamespace):
         evaluates registered regexes on every message (PATTERN_MATCHED) and
         parses @botname from content to route as BOT_COMMAND.
 
+        BUSINESS RULE (MEADOWS-labeling-intent §2.10): RPC messages are NOT
+        room-broadcast.  They reach subscribers exclusively via label routing.
+        The server persists them but skips room broadcast, pattern eval,
+        and @bot command routing.
+
         BUSINESS RULE (monolith sioserver.py:1513): the sender DOES receive
         their own message back (no skip_sid). The client deduplicates by
         message ID. This is standard chat behavior — the optimistic-UI
@@ -949,6 +1181,12 @@ class ChatNamespace(socketio.AsyncNamespace):
         to someone else" notifications, not "your action was confirmed."
         """
         wire = message_to_wire(msg)
+
+        # RPC messages: persist and route via labels only — no room broadcast
+        if msg.type in (MessageType.RPC_REQUEST, MessageType.RPC_RESPONSE):
+            await self.hub.persistence.store(msg.group_id, msg)
+            return
+
         await self.hub.emit_frame(EventName.MESSAGE, wire, room=msg.group_id)
         await self.hub.persistence.store(msg.group_id, msg)
 
@@ -957,6 +1195,10 @@ class ChatNamespace(socketio.AsyncNamespace):
 
         # Evaluate registered patterns
         await self._evaluate_patterns(msg.group_id, msg)
+
+        # Auto-room-label (§2.1): every non-RPC message gets a room label
+        auto_label = {"origin": "meadows", "label": f"room:{msg.group_id}", "semver": "1.0.0", "metadata": None}
+        await self._evaluate_and_deliver_labels(msg.id, [auto_label], "server")
 
     async def handle_webhook(self, group_id: str, claims: JWTClaims, data: dict) -> str:
         """Handle an inbound webhook message over HTTP transport.

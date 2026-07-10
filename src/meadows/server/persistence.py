@@ -13,6 +13,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+
+from endow import Service
 
 from meadows.protocol import Message
 from meadows.protocol.codec import message_from_wire, message_to_wire
@@ -28,12 +31,15 @@ def _safe_filename(group_id: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in group_id) or "_"
 
 
-class JSONLPersistence:
+class JSONLPersistence(Service):
     """Append-only JSONL message store: ``<messages_dir>/<group_id>.jsonl``."""
 
-    def __init__(self, messages_dir: Path) -> None:
-        self.messages_dir = Path(messages_dir)
-        self.messages_dir.mkdir(parents=True, exist_ok=True)
+    messages_dir: Path
+
+    def __init__(self, messages_dir: Path | None = None) -> None:
+        if messages_dir is not None:
+            self.messages_dir = Path(messages_dir)
+            self.messages_dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, group_id: str) -> Path:
         return self.messages_dir / f"{_safe_filename(group_id)}.jsonl"
@@ -41,6 +47,18 @@ class JSONLPersistence:
     async def store(self, group_id: str, msg: Message) -> None:
         """Append a message as one JSON line to the group's file."""
         line = json.dumps(message_to_wire(msg), separators=(",", ":"))
+        with self._path(group_id).open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    async def store_label_assigned(self, group_id: str, label_data: dict[str, Any]) -> None:
+        """Append a LABEL_ASSIGNED record to the group's JSONL.
+
+        BUSINESS RULE (MEADOWS-labeling-intent §2.9): LABEL_ASSIGNED
+        events are stored as separate records in the group JSONL.  The
+        server never merges MESSAGE and LABEL_ASSIGNED — they are
+        distinct records.  FETCH_MESSAGES returns both.
+        """
+        line = json.dumps(label_data, separators=(",", ":"))
         with self._path(group_id).open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 

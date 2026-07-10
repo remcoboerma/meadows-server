@@ -20,6 +20,7 @@ from meadows.protocol import EventName
 
 from meadows.server.chokepoint import validate_frame
 from meadows.server.groups import GroupState
+from meadows.server.label_dedup import LabelDedupIndex
 from meadows.server.namespace import GENERAL_GROUP, ChatNamespace
 from meadows.server.ntfy_prefs import NtfyPrefsStore
 from meadows.server.persistence import JSONLPersistence
@@ -55,13 +56,18 @@ class Hub:
         self.bot_registry: dict[str, dict[str, Any]] = {}
         self.groups: dict[str, GroupState] = {}
         self.pattern_registry: dict[str, list[dict[str, Any]]] = {}
+        self.label_subscriptions: dict[str, list[dict[str, Any]]] = {}
+        # Maps storage_key ("*" or group_id) → list of subscription dicts.
+        # Each dict: name, predicate, deliver, scope, group_id, bot_id, bot_sid, registered_at
+        self.label_dedup = LabelDedupIndex(self.messages_dir / ".label_dedup")
         self.bot_rate_limits: dict[str, list[float]] = {}
         self.rate_limited_bots: dict[str, float] = {}
 
-        self.persistence = JSONLPersistence(self.messages_dir)
+        self.persistence = JSONLPersistence.with_injected(messages_dir=self.messages_dir)
         # BUSINESS RULE (§3.3): ntfy prefs stored per-user; the server owns
         # this because only the server knows who is online.
-        self.ntfy_prefs = NtfyPrefsStore(ntfy_prefs_path or (self.messages_dir.parent / "ntfy_prefs.json"))
+        ntfy_path = ntfy_prefs_path or (self.messages_dir.parent / "ntfy_prefs.json")
+        self.ntfy_prefs = NtfyPrefsStore.with_injected(prefs_path=ntfy_path)
         self.namespace = ChatNamespace(self.NAMESPACE, hub=self)
         self.sio.register_namespace(self.namespace)
 
@@ -93,6 +99,7 @@ class Hub:
         The ASGI/transport lifecycle is owned by uvicorn; this only clears
         hub-level bookkeeping so a stopped Hub can be discarded cleanly.
         """
+        self.label_dedup.close()
 
     # -- the client edge (chokepoint) -------------------------------------
 

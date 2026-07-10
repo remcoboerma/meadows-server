@@ -7,14 +7,17 @@ name = "meadows-server"
 dynamic = ["version"]
 description = "MEADOWS coordination hub: object-oriented Hub, single chokepoint emit, JWT auth, JSONL persistence."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license-expression = "MIT"
 authors = [{ name = "MEADOWS" }]
 dependencies = [
     "meadows-protocol",
+    "meadows-jsonlogic",
+    "diskcache>=5.6.0",
     "python-socketio>=5.11.0",
     "uvicorn>=0.30.0",
     "pyjwt>=2.12.0",
+    "endow>=0.1.6",
 ]
 
 [project.optional-dependencies]
@@ -34,11 +37,12 @@ packages = ["src/meadows"]
 
 [tool.uv.sources]
 meadows-protocol = { path = "../meadows-protocol", editable = true }
+meadows-jsonlogic = { path = "../meadows-jsonlogic", editable = true }
 meadows-client = { path = "../meadows-client", editable = true }
 meadows-bot = { path = "../meadows-bot", editable = true }
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py314"
 line-length = 120
 
 [tool.ruff.lint]

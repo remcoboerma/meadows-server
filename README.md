@@ -7,6 +7,8 @@
 
 ## Install
 
+Requires Python 3.14+.
+
 ```bash
 uv pip install -e .
 ```
@@ -46,7 +48,10 @@ MeadowServer (ASGI entrypoint)
 
 ### The Hub (state container)
 
-All mutable state lives on the `Hub` instance — never in module globals:
+All mutable state lives on the `Hub` instance — never in module globals.
+Infrastructure services (`JSONLPersistence`, `NtfyPrefsStore`) are wired
+via [endow](https://pypi.org/project/endow/) — typed class attributes are
+the source of truth, and `with_injected(...)` resolves dependencies.
 
 | Attribute | Type | Purpose |
 |---|---|---|
@@ -418,9 +423,9 @@ server runs `_dispatch_message()`:
 | `chokepoint.py` | `validate_frame()` / `emit_frame()`: the single client edge. Validates every frame against `meadows.protocol`. |
 | `auth.py` | `verify_token()` + `AuthASGIApp`: JWT verification and HTTP middleware. |
 | `namespace.py` | `ChatNamespace`: the Socket.IO `/chat` namespace handler. All event handlers. |
-| `persistence.py` | `JSONLPersistence`: append-only JSONL message store. |
+| `persistence.py` | `JSONLPersistence` (endow `Service`): append-only JSONL message store. |
 | `groups.py` | `GroupState`: in-memory group membership. |
-| `ntfy_prefs.py` | `NtfyPrefsStore`: per-user notification preferences. |
+| `ntfy_prefs.py` | `NtfyPrefsStore` (endow `Service`): per-user notification preferences. |
 | `app.py` | `MeadowServer` / `create_app()`: ASGI entrypoint composing Hub + auth + webhook routing. |
 
 ## Architecture invariants
