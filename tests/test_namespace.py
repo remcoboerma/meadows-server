@@ -126,11 +126,11 @@ class TestMessage:
         assert msgs[0]["data"]["user_id"] == "user-alice"
         assert msgs[0]["data"]["username"] == "alice"
 
-    async def test_bot_response_broadcasts_as_bot_message(self, hub, fake_sio, bot_token):
+    async def test_bot_message_via_message_event(self, hub, fake_sio, bot_token):
         await hub.namespace.on_connect("sid-1", {})
         await hub.namespace.on_authenticate("sid-1", {"token": bot_token()})
 
-        await hub.namespace.on_bot_response("sid-1", _wire("pong", user_id="bot-echo"))
+        await hub.namespace.on_message("sid-1", _wire("pong", user_id="bot-echo"))
 
         msgs = fake_sio.events(EventName.MESSAGE.value)
         assert len(msgs) == 1
@@ -140,27 +140,30 @@ class TestMessage:
         persisted = await hub.persistence.load_group("general")
         assert persisted[0].type == MessageType.BOT
 
-    async def test_bot_response_from_non_bot_rejected(self, hub, fake_sio, user_token):
+    async def test_bot_response_deprecated_alias_for_message(self, hub, fake_sio, user_token):
+        """Deprecated bot_response is now an alias for message."""
         await hub.namespace.on_connect("sid-1", {})
         await hub.namespace.on_authenticate("sid-1", {"token": user_token()})
 
         await hub.namespace.on_bot_response("sid-1", _wire("pong"))
 
-        assert fake_sio.events(EventName.MESSAGE.value) == []
-        assert len(fake_sio.events(EventName.ERROR.value)) == 1
+        # bot_response delegates to on_message — user message goes through
+        msgs = fake_sio.events(EventName.MESSAGE.value)
+        assert len(msgs) == 1
+        assert msgs[0]["data"]["type"] == "user"
 
 
 class TestBotRateLimit:
-    async def test_bot_response_allowed_under_limit(self, hub, fake_sio, bot_token):
+    async def test_bot_message_allowed_under_limit(self, hub, fake_sio, bot_token):
         await hub.namespace.on_connect("sid-bot", {})
         await hub.namespace.on_authenticate("sid-bot", {"token": bot_token(name="echo")})
 
-        await hub.namespace.on_bot_response("sid-bot", _wire("pong", user_id="bot-echo"))
+        await hub.namespace.on_message("sid-bot", _wire("pong", user_id="bot-echo"))
 
         assert len(fake_sio.events(EventName.MESSAGE.value)) == 1
         assert fake_sio.events(EventName.RATE_LIMITED.value) == []
 
-    async def test_bot_response_blocked_at_limit(self, hub, fake_sio, bot_token):
+    async def test_bot_message_blocked_at_limit(self, hub, fake_sio, bot_token):
         from meadows.server.namespace import RATE_LIMIT_MAX_MESSAGES
 
         await hub.namespace.on_connect("sid-bot", {})
@@ -168,11 +171,11 @@ class TestBotRateLimit:
 
         # Exhaust the sliding window
         for _ in range(RATE_LIMIT_MAX_MESSAGES):
-            await hub.namespace.on_bot_response("sid-bot", _wire("msg", user_id="bot-echo"))
+            await hub.namespace.on_message("sid-bot", _wire("msg", user_id="bot-echo"))
         fake_sio.emits.clear()
 
         # Next one should be rate-limited
-        await hub.namespace.on_bot_response("sid-bot", _wire("over", user_id="bot-echo"))
+        await hub.namespace.on_message("sid-bot", _wire("over", user_id="bot-echo"))
 
         assert fake_sio.events(EventName.MESSAGE.value) == []
         rate_events = fake_sio.events(EventName.RATE_LIMITED.value)
@@ -187,7 +190,7 @@ class TestBotRateLimit:
 
         # Exhaust the window
         for _ in range(RATE_LIMIT_MAX_MESSAGES):
-            await hub.namespace.on_bot_response("sid-bot", _wire("msg", user_id="bot-echo"))
+            await hub.namespace.on_message("sid-bot", _wire("msg", user_id="bot-echo"))
 
         # Disconnect — clears rate limit state
         await hub.namespace.on_disconnect("sid-bot")
@@ -198,12 +201,12 @@ class TestBotRateLimit:
         fake_sio.emits.clear()
 
         # Should be allowed again
-        await hub.namespace.on_bot_response("sid-bot-2", _wire("fresh", user_id="bot-echo"))
+        await hub.namespace.on_message("sid-bot-2", _wire("fresh", user_id="bot-echo"))
 
         assert len(fake_sio.events(EventName.MESSAGE.value)) == 1
 
     async def test_user_message_not_rate_limited(self, hub, fake_sio, user_token):
-        """Only bot_response is rate-limited, not user messages."""
+        """Only bot messages are rate-limited, not user messages."""
         await hub.namespace.on_connect("sid-1", {})
         await hub.namespace.on_authenticate("sid-1", {"token": user_token()})
 

@@ -25,7 +25,8 @@ class TestValidateFrameMessages:
     def test_accepts_valid_message_frame(self):
         validate_frame(EventName.MESSAGE, _valid_message_wire())
 
-    def test_accepts_valid_bot_response_frame(self):
+    def test_accepts_valid_bot_response_frame_deprecated(self):
+        """BOT_RESPONSE is deprecated but still validated for backward compat."""
         wire = Message(
             type=MessageType.BOT,
             user_id="bot-echo",
@@ -79,6 +80,7 @@ class TestValidateFrameSystemEvents:
 
     def test_message_events_set_is_contracted(self):
         assert EventName.MESSAGE in MESSAGE_EVENTS
+        # BOT_RESPONSE is deprecated but kept in MESSAGE_EVENTS for backward compat
         assert EventName.BOT_RESPONSE in MESSAGE_EVENTS
         assert EventName.USER_TYPING not in MESSAGE_EVENTS
 

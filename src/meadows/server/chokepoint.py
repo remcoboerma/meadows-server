@@ -6,7 +6,7 @@ the wire. This is the "client edge" from MEADOWS-migration-intent.md section
 central validation; this is the consolidation.
 
 Rules:
-  - Message-carrying events (MESSAGE, BOT_RESPONSE): the data must round-trip
+  - Message-carrying events (MESSAGE, BOT_RESPONSE [deprecated]): the data must round-trip
     through the protocol envelope (meadows.protocol.codec.message_from_wire).
   - Other known events (closed set in EventName): accepted as long as data is
     a dict. Their payload shapes are not yet formalised in the protocol

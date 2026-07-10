@@ -195,7 +195,11 @@ class ChatNamespace(socketio.AsyncNamespace):
     # -- chat -------------------------------------------------------------
 
     async def on_message(self, sid: str, data: dict) -> None:
-        """Handle a user message: broadcast, persist, route to bots, evaluate patterns.
+        """Handle a message: broadcast, persist, route to bots, evaluate patterns.
+
+        This is the canonical message handler for both users and bots. Bots
+        are subject to per-bot rate limiting (same limits that ``on_bot_response``
+        enforced). Users are never rate-limited.
 
         BUSINESS RULE (MEADOWS §3.3): patterns and @bot routing are core
         server machinery, not bot features. The server evaluates registered
@@ -211,25 +215,25 @@ class ChatNamespace(socketio.AsyncNamespace):
         if session is None:
             return
         claims = session["claims"]
+        # BUSINESS RULE: per-bot rate limiting. Users are never rate-limited.
+        if claims.is_bot():
+            bot_name = claims.bot_name or claims.sub
+            if not self._check_rate_limit(bot_name):
+                await self.hub.emit_frame(EventName.RATE_LIMITED, {"bot_name": bot_name}, sid=sid)
+                return
         msg = self._build_message(data, claims, MessageType.USER if claims.is_user() else MessageType.BOT)
         if parse_everyone(msg.content) and "mention-all" in claims.permissions:
             msg.is_everyone = True
         await self._dispatch_message(msg, sid=sid)
 
     async def on_bot_response(self, sid: str, data: dict) -> None:
-        session = await self._require_auth(sid)
-        if session is None:
-            return
-        claims = session["claims"]
-        if not claims.is_bot():
-            await self.hub.emit_frame(EventName.ERROR, {"error": "only bots may emit bot_response"}, sid=sid)
-            return
-        bot_name = claims.bot_name or claims.sub
-        if not self._check_rate_limit(bot_name):
-            await self.hub.emit_frame(EventName.RATE_LIMITED, {"bot_name": bot_name}, sid=sid)
-            return
-        msg = self._build_message(data, claims, MessageType.BOT)
-        await self._dispatch_message(msg, sid=sid)
+        """Deprecated: use the ``message`` event with bot auth instead.
+
+        This handler is kept for backward compatibility with bots that still
+        emit ``bot_response``. It delegates to ``on_message`` which now handles
+        bot rate limiting and type assignment automatically.
+        """
+        await self.on_message(sid, data)
 
     async def on_typing(self, sid: str, data: dict) -> None:
         session = await self._require_auth(sid)

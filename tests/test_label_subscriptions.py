@@ -274,7 +274,7 @@ class TestAutoRoomLabel:
         )
         from meadows.server.chokepoint import message_to_wire
 
-        await hub.namespace.on_bot_response("bot-1", message_to_wire(msg))
+        await hub.namespace.on_message("bot-1", message_to_wire(msg))
 
         messages = fake_sio.events(EventName.MESSAGE.value)
         assert messages == []
