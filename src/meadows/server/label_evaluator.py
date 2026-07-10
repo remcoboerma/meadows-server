@@ -5,6 +5,8 @@ reach abonnees.  The server evaluates JSON Logic predicates against
 each label on a message and returns which subscriptions matched.
 
 Uses meadows.jsonlogic.evaluate for the actual predicate evaluation.
+Regex compilation caching lives in meadows.jsonlogic.evaluate where
+the regex is actually executed.
 """
 
 from __future__ import annotations
