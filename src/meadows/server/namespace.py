@@ -304,10 +304,7 @@ class ChatNamespace(socketio.AsyncNamespace):
             for lbl in msg.labels
         ]
         if wire_labels:
-            print(f"[FormSubmission] msg_id={msg.id} labels={wire_labels} user={msg.user_id}")
             await self._evaluate_and_deliver_labels(msg.id, wire_labels, msg.user_id)
-        else:
-            print(f"[FormSubmission] msg_id={msg.id} NO LABELS — answer_label={data.get('answer_label')}")
 
     @staticmethod
     def _sanitize_meadows_metadata(msg: Message) -> None:
@@ -1048,18 +1045,12 @@ class ChatNamespace(socketio.AsyncNamespace):
         """
         all_subs = [e for entries in self.hub.label_subscriptions.values() for e in entries]
         if not all_subs:
-            print(f"[FormEval] NO SUBSCRIPTIONS at all, labels={labels}")
             return
 
         msg = Message(type=MessageType.SYSTEM, user_id="system", group_id="general", content="")
         matches = evaluate_label_subscriptions(all_subs, labels, msg)
         if not matches:
-            print(f"[FormEval] no matches. subs={len(all_subs)} labels={labels}")
-            for s in all_subs:
-                print(f"  sub: name={s.get('name')} pred={s.get('predicate')} deliver={s.get('deliver')}")
             return
-
-        print(f"[FormEval] matches: {list(matches.keys())}")
 
         # Build lookup: subscription name → entry
         sub_lookup = {e["name"]: e for entries in self.hub.label_subscriptions.values() for e in entries}
@@ -1132,7 +1123,6 @@ class ChatNamespace(socketio.AsyncNamespace):
             # Only for initial dispatch, not cascade passes.
             group_id = self._find_group_for_message(target_msg_id)
             messages = await self.hub.persistence.load_by_ids(group_id, [target_msg_id])
-            print(f"[FormDeliver] sub={sub_name} target={target_msg_id} group={group_id} found={len(messages)} bot_sid={bot_sid}")
             if messages:
                 await self.hub.emit_frame(EventName.MESSAGE, messages[0], sid=bot_sid)
 
