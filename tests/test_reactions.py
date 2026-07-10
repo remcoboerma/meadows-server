@@ -58,7 +58,7 @@ async def _send_message(hub, fake_sio, sid: str = "sid-1") -> str:
 
 
 class TestAddReaction:
-    """Tests for on_add_reaction — the ➕ button behavior verified via Playwright."""
+    """Tests for on_add_reaction — the + button behavior verified via Playwright."""
 
     async def test_add_reaction_emits_reaction_added_and_persists(self, hub, fake_sio, user_token):
         """Clicking 👍 in the emoji popup emits REACTION_ADDED + stores in JSONL."""

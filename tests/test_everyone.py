@@ -116,7 +116,7 @@ class TestEveryonePermissionGate:
         msgs = fake_sio.events(EventName.MESSAGE.value)
         assert msgs[0]["data"]["is_everyone"] is False
 
-    async def test_everyone_with_permission_persists_is_everyone(self, hub, fake_sio, user_token):
+    async def test_everyone_with_permission_persists_is_everyone(self, hub, fake_sio, user_token):  # noqa: ARG002
         """is_everyone=True is persisted to JSONL so it survives reload."""
         await _auth_user(hub, user_token, permissions=["mention-all"])
 

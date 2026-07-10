@@ -307,7 +307,7 @@ class TestIntegrationProtocolContract:
 
 
 class TestIntegrationReactions:
-    """End-to-end reaction tests — proves the ➕ button flow works over real Socket.IO.
+    """End-to-end reaction tests — proves the + button flow works over real Socket.IO.
 
     BUSINESS RULE (MEADOWS §3.3 line 73): reactions are core machinery. The
     server persists them as type='reaction' messages and emits REACTION_ADDED
@@ -315,7 +315,7 @@ class TestIntegrationReactions:
     toggles the reaction off — the same flow validated via Playwright.
     """
 
-    async def test_add_reaction_end_to_end(self, user_client, integration_secret):
+    async def test_add_reaction_end_to_end(self, user_client, integration_secret):  # noqa: ARG002
         """User sends message, then adds a 👍 reaction — REACTION_ADDED received."""
         received: list[dict] = []
 
@@ -350,7 +350,7 @@ class TestIntegrationReactions:
         assert received[0]["target_message_id"] == msg_id
         assert received[0]["type"] == MessageType.REACTION.value
 
-    async def test_toggle_reaction_end_to_end(self, user_client, integration_secret):
+    async def test_toggle_reaction_end_to_end(self, user_client, integration_secret):  # noqa: ARG002
         """Adding the same emoji twice toggles it off — REACTION_TOGGLED received."""
         added: list[dict] = []
         toggled: list[dict] = []
