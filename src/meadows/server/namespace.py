@@ -1182,9 +1182,17 @@ class ChatNamespace(socketio.AsyncNamespace):
         """
         wire = message_to_wire(msg)
 
-        # RPC messages: persist and route via labels only — no room broadcast
+        # RPC messages: persist and route via labels only — no room broadcast.
+        # BUSINESS RULE (§2.10): RPC reaches subscribers exclusively via
+        # label routing on the message's own labels, not the auto-room-label.
         if msg.type in (MessageType.RPC_REQUEST, MessageType.RPC_RESPONSE):
             await self.hub.persistence.store(msg.group_id, msg)
+            rpc_labels = [
+                {"origin": lbl.origin, "label": lbl.label, "semver": lbl.semver, "metadata": lbl.metadata}
+                for lbl in msg.labels
+            ]
+            if rpc_labels:
+                await self._evaluate_and_deliver_labels(msg.id, rpc_labels, msg.bot_name or msg.user_id)
             return
 
         await self.hub.emit_frame(EventName.MESSAGE, wire, room=msg.group_id)
@@ -1229,14 +1237,14 @@ class ChatNamespace(socketio.AsyncNamespace):
         if len(content) > MAX_WEBHOOK_CONTENT:
             raise WebhookError(400, "content too large")
 
-        msg = Message(
-            type=MessageType.WEBHOOK,
-            user_id=claims.sub,
-            username=claims.username if claims.is_user() else None,
-            bot_name=claims.bot_name if claims.is_bot() else None,
-            group_id=group_id,
-            content=content,
-        )
+        # BUSINESS RULE (§2.10): webhook uses _build_message so RPC
+        # type and labels from wire data are preserved, matching the
+        # Socket.IO on_message flow.  DRY — same builder, same rules.
+        # group_id comes from the URL path (not the wire data), so inject it.
+        payload = {**(data if isinstance(data, dict) else {}), "content": content, "group_id": group_id}
+        payload.setdefault("type", "webhook")
+        msg = self._build_message(payload, claims, MessageType.WEBHOOK)
+
         if parse_everyone(msg.content) and "mention-all" in claims.permissions:
             msg.is_everyone = True
 
