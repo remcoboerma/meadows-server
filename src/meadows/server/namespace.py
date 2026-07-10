@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 import jwt as pyjwt
 import socketio
 
-from meadows.protocol import EventName, Message, MessageType, build_claims, parse_everyone
+from meadows.protocol import EventName, Label, Message, MessageType, build_claims, parse_everyone
 from meadows.protocol.codec import message_from_wire
 from meadows.protocol.jwt import ALGORITHM, JWTRole, JWTClaims
 from meadows.protocol.labels import MAX_LABEL_METADATA_LENGTH
@@ -44,6 +44,11 @@ RATE_LIMIT_MAX_MESSAGES = 30
 RATE_LIMIT_WINDOW_SECONDS = 60.0
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 _GROUP_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+# BUSINESS RULE (MEADOWS-forms-intent §2.4): known keys under
+# metadata['meadows']. The server strips unknown keys before persisting
+# or routing. New protocol keys are an escalation point.
+_KNOWN_MEADOWS_KEYS: frozenset[str] = frozenset({"form_handling"})
 
 
 class WebhookError(Exception):
@@ -224,6 +229,7 @@ class ChatNamespace(socketio.AsyncNamespace):
         msg = self._build_message(data, claims, MessageType.USER if claims.is_user() else MessageType.BOT)
         if parse_everyone(msg.content) and "mention-all" in claims.permissions:
             msg.is_everyone = True
+        self._sanitize_meadows_metadata(msg)
         await self._dispatch_message(msg, sid=sid)
 
     async def on_bot_response(self, sid: str, data: dict) -> None:
@@ -234,6 +240,94 @@ class ChatNamespace(socketio.AsyncNamespace):
         bot rate limiting and type assignment automatically.
         """
         await self.on_message(sid, data)
+
+    # -- form submissions -------------------------------------------------
+
+    async def on_form_submission(self, sid: str, data: dict) -> None:
+        """Handle a form_submission: persist, evaluate labels, do NOT room-broadcast.
+
+        BUSINESS RULE (MEADOWS-forms-intent §2.9): form submissions are
+        treated as normal messages that route via label subscriptions.
+        No room broadcast (like RPC). The server sanitizes metadata['meadows'],
+        persists in JSONL, and evaluates label subscriptions against the
+        labels on the submission message.
+
+        BUSINESS RULE (MEADOWS-forms-intent §2.8): the frontend sends
+        answer_label from the original form's metadata. The server trusts
+        the frontend to place it as a label on the submission.
+        """
+        session = await self._require_auth(sid)
+        if session is None:
+            return
+        claims = session["claims"]
+
+        form_data = data.get("form_data", {}) if isinstance(data, dict) else {}
+        answer_label = data.get("answer_label") if isinstance(data, dict) else None
+        group_id = data.get("group_id", GENERAL_GROUP) if isinstance(data, dict) else GENERAL_GROUP
+
+        # Build human-readable summary from form data
+        summary_parts = [f"{k} = {v}" for k, v in form_data.items()]
+        content = f"Formulier ingevuld: {', '.join(summary_parts)}" if summary_parts else "Formulier ingevuld"
+
+        # Build labels from answer_label
+        labels = []
+        if answer_label and isinstance(answer_label, (list, tuple)) and len(answer_label) >= 3:
+            labels.append(
+                Label(str(answer_label[0]), str(answer_label[1]), str(answer_label[2]))
+            )
+
+        # Build metadata
+        metadata: dict[str, Any] = {}
+        if form_data:
+            metadata["meadows"] = {
+                "form_handling": {
+                    "response": form_data,
+                }
+            }
+
+        msg = Message(
+            type=MessageType.FORM_SUBMISSION,
+            user_id=claims.sub,
+            username=claims.name() if claims.is_user() else None,
+            group_id=group_id,
+            content=content,
+            labels=labels,
+            metadata=metadata,
+        )
+
+        self._sanitize_meadows_metadata(msg)
+        await self.hub.persistence.store(msg.group_id, msg)
+
+        # Evaluate label subscriptions (like RPC — no room broadcast)
+        wire_labels = [
+            {"origin": lbl.origin, "label": lbl.label, "semver": lbl.semver, "metadata": lbl.metadata}
+            for lbl in msg.labels
+        ]
+        if wire_labels:
+            print(f"[FormSubmission] msg_id={msg.id} labels={wire_labels} user={msg.user_id}")
+            await self._evaluate_and_deliver_labels(msg.id, wire_labels, msg.user_id)
+        else:
+            print(f"[FormSubmission] msg_id={msg.id} NO LABELS — answer_label={data.get('answer_label')}")
+
+    @staticmethod
+    def _sanitize_meadows_metadata(msg: Message) -> None:
+        """Strip unknown keys from metadata['meadows'].
+
+        BUSINESS RULE (MEADOWS-forms-intent §2.4): the server saneert
+        metadata['meadows'] — unknown keys are removed before the message
+        is persisted or routed. Domain metadata (keys other than 'meadows')
+        stays untouched.
+
+        Known keys are defined in _KNOWN_MEADOWS_KEYS.
+        """
+        meadows_meta = msg.metadata.get("meadows")
+        if not isinstance(meadows_meta, dict):
+            return
+        unknown_keys = set(meadows_meta.keys()) - _KNOWN_MEADOWS_KEYS
+        for key in unknown_keys:
+            del meadows_meta[key]
+        if not meadows_meta:
+            del msg.metadata["meadows"]
 
     async def on_typing(self, sid: str, data: dict) -> None:
         session = await self._require_auth(sid)
@@ -954,12 +1048,18 @@ class ChatNamespace(socketio.AsyncNamespace):
         """
         all_subs = [e for entries in self.hub.label_subscriptions.values() for e in entries]
         if not all_subs:
+            print(f"[FormEval] NO SUBSCRIPTIONS at all, labels={labels}")
             return
 
         msg = Message(type=MessageType.SYSTEM, user_id="system", group_id="general", content="")
         matches = evaluate_label_subscriptions(all_subs, labels, msg)
         if not matches:
+            print(f"[FormEval] no matches. subs={len(all_subs)} labels={labels}")
+            for s in all_subs:
+                print(f"  sub: name={s.get('name')} pred={s.get('predicate')} deliver={s.get('deliver')}")
             return
+
+        print(f"[FormEval] matches: {list(matches.keys())}")
 
         # Build lookup: subscription name → entry
         sub_lookup = {e["name"]: e for entries in self.hub.label_subscriptions.values() for e in entries}
@@ -1030,9 +1130,9 @@ class ChatNamespace(socketio.AsyncNamespace):
             # subscriber receives.  "message_only" sends the full
             # MESSAGE event so bots that need content can analyze it.
             # Only for initial dispatch, not cascade passes.
-            messages = await self.hub.persistence.load_by_ids(
-                self._find_group_for_message(target_msg_id), [target_msg_id]
-            )
+            group_id = self._find_group_for_message(target_msg_id)
+            messages = await self.hub.persistence.load_by_ids(group_id, [target_msg_id])
+            print(f"[FormDeliver] sub={sub_name} target={target_msg_id} group={group_id} found={len(messages)} bot_sid={bot_sid}")
             if messages:
                 await self.hub.emit_frame(EventName.MESSAGE, messages[0], sid=bot_sid)
 
@@ -1252,6 +1352,7 @@ class ChatNamespace(socketio.AsyncNamespace):
         if parse_everyone(msg.content) and "mention-all" in claims.permissions:
             msg.is_everyone = True
 
+        self._sanitize_meadows_metadata(msg)
         await self._dispatch_message(msg)
         return msg.id
 
