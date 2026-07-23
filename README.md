@@ -5,6 +5,21 @@
 > chokepoint emit that validates frames against `meadows.protocol` before they
 > hit the wire.
 
+## Overview
+
+The server handles:
+
+- **Socket.IO transport** — real-time bidirectional messaging
+- **JWT authentication** — user and bot identity verification
+- **Message persistence** — append-only JSONL storage
+- **Group management** — create, join, leave, delete groups
+- **Bot routing** — `@bot` mention parsing and dispatch
+- **Pattern matching** — regex-based message interception for bots
+- **Label subscription evaluation** — JSON Logic predicate matching against labels
+- **RPC routing** — bot-to-bot service calls via label routing
+- **Rate limiting** — 30 msg/min per bot with 60s cooldown
+- **Webhook API** — HTTP endpoint for injecting messages
+
 ## Install
 
 Requires Python 3.14+.
@@ -60,6 +75,7 @@ the source of truth, and `with_injected(...)` resolves dependencies.
 | `bot_registry` | `dict[str, dict]` | Registered bots (keyed by bot_name) |
 | `groups` | `dict[str, GroupState]` | Active groups (keyed by group_id) |
 | `pattern_registry` | `dict[str, list]` | Registered regex patterns (keyed by scope) |
+| `label_subscriptions` | `dict[str, list]` | Registered label subscriptions (keyed by scope) |
 | `bot_rate_limits` | `dict[str, list[float]]` | Per-bot sliding window timestamps for rate limiting |
 | `rate_limited_bots` | `dict[str, float]` | Per-bot cooldown expiry (monotonic) for rate limiting |
 | `persistence` | `JSONLPersistence` | Append-only JSONL message store |
@@ -188,6 +204,13 @@ Messages carry a `type` field that identifies their origin:
 | `register_pattern` | client -> server | bot only | Register a regex pattern. Server evaluates all patterns on every incoming message and emits `pattern_matched` to the registering bot. Max 50 patterns per scope (room or global), 512 chars. |
 | `unregister_pattern` | client -> server | bot only | Remove a pattern by name. |
 
+### Label subscriptions
+
+| Event | Direction | Auth | Description |
+|---|---|---|---|
+| `register_label_subscription` | client -> server | yes | Register a label subscription with a JSON Logic predicate. Server evaluates subscriptions against message labels and emits `label_assigned` to matching subscribers. |
+| `unregister_label_subscription` | client -> server | yes | Remove a label subscription by name. |
+
 ### Bot registration
 
 | Event | Direction | Auth | Description |
@@ -291,6 +314,9 @@ All messages (user, bot, webhook, reaction) share the same envelope from
 | `pattern_registered` | Pattern registration confirmed |
 | `pattern_unregistered` | Pattern removed |
 | `pattern_matched` | Regex pattern matched a message |
+| `label_subscription_registered` | Label subscription confirmed |
+| `label_subscription_unregistered` | Label subscription removed |
+| `label_assigned` | Label subscription matched — delivered to subscriber |
 | `bot_unregistered` | Bot disconnected (broadcast to all connected clients) |
 | `bot_not_found` | @mention targets neither a registered bot nor a known user in the group |
 | `rate_limited` | Bot exceeded rate limit (30 msg/min), enters 60s cooldown |
