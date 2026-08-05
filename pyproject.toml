@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "meadows-server"
-dynamic = ["version"]
+version = "0.1.0"
 description = "MEADOWS coordination hub: object-oriented Hub, single chokepoint emit, JWT auth, JSONL persistence."
 readme = "README.md"
 requires-python = ">=3.14"
@@ -29,9 +29,6 @@ integration = [
     "httpx>=0.27.0",
 ]
 
-[tool.hatch.version]
-path = "src/meadows/server/__about__.py"
-
 [tool.hatch.build.targets.wheel]
 packages = ["src/meadows"]
 
@@ -51,3 +48,48 @@ select = ["F", "E", "W", "Q", "A", "SIM", "ARG", "PTH", "RUF", "C90", "N", "YTT"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.vommit]
+allow_breaking_bang = true
+allow_breaking_footer = true
+prerelease_token = "rc"
+confirm = true
+
+[tool.vommit.git]
+enabled = true
+origin = "origin"
+branch = "main"
+on_wrong_branch = "error"
+tag_format = "v{version}"
+commit_format = "{version}"
+
+[tool.vommit.changelog]
+enabled = true
+file = "CHANGELOG.md"
+include_prereleases = false
+placeholder = "<!-- next-version-placeholder -->"
+placeholder_regex = "<auto>"
+entry_title_format = "## v{version} ({date:%Y-%m-%d})"
+
+[tool.vommit.changelog.levels]
+break = "Breaking Change{s}"
+feat = "Feature{s}"
+fix = "Fix{es}"
+perf = "Performance"
+docs = "Documentation"
+
+[tool.vommit.pypi]
+enabled = true
+use_keyring = true
+
+[tool.vommit.commands]
+clean = "rm -rf ./dist"
+build = "uv build"
+publish = "../pypi-publish"
+post_publish = ""
+
+[tool.vommit.version_bump_map]
+break = "major"
+feat = "minor"
+fix = "patch"
+perf = "patch"

@@ -106,6 +106,7 @@ def setup(c: Context) -> None:
     _check_env("MEADOWS_DEBUG", default="0", comment="Debug logging (0 or 1)")
     _check_env("PROJECT", default="meadows", comment="Traefik project prefix")
     _check_env("HOSTINGDOMAIN", default="localhost", comment="Traefik hosting domain")
+    _check_env("ROUTER_HOST", default="", comment="Full Traefik host rule; empty = chat.$HOSTINGDOMAIN")
 
     # Ensure the JWT secret key exists (generate if missing).
     import os
